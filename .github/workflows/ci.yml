@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Show Swift version
+        run: swift --version
+      - name: Validate metadata and scripts
+        run: |
+          plutil -lint App/Info.plist
+          zsh -n scripts/build-app.sh
+          zsh -n scripts/recover-travel-lockdown.sh
+      - name: Run tests
+        run: swift test
+      - name: Compile release executable
+        run: swift build -c release
