@@ -26,7 +26,7 @@ struct PackagingTests {
         #expect(info?["LSMinimumSystemVersion"] as? String == "15.0")
     }
 
-    @Test("public release is branded, licensed, and keeps menu confirmations inline")
+    @Test("public release keeps a native menu trigger and the full branded dashboard")
     func publicReleaseMetadataIsComplete() throws {
         let logo = packageRoot.appendingPathComponent("Assets/gamechangers-ai.png")
         let license = packageRoot.appendingPathComponent("LICENSE")
@@ -39,6 +39,11 @@ struct PackagingTests {
         #expect(menuText.contains("LockdownSwitch"))
         #expect(menuText.contains("Refreshing status"))
         #expect(menuText.contains("VERIFYING"))
+        #expect(menuText.contains("GroupBox(\"Status\")"))
+        #expect(menuText.contains("GroupBox(\"Preflight\")"))
+        #expect(menuText.contains("Label(\"Status\", systemImage: \"checkmark.shield\")"))
+        #expect(menuText.contains("Label(\"Preflight\", systemImage: \"checklist\")"))
+        #expect(menuText.contains("GameChangersBrandLogo"))
         #expect(menuText.contains(".alert(item:") == false)
 
         let appSource = try String(
@@ -46,7 +51,9 @@ struct PackagingTests {
                 .appendingPathComponent("Sources/TravelLockdown/App/TravelLockdownApp.swift"),
             encoding: .utf8
         )
-        #expect(appSource.contains("GameChangersMenuBarLogo"))
+        #expect(appSource.contains("Label(menuBarPresentation.title"))
+        #expect(appSource.contains(".menuBarExtraStyle(.window)"))
+        #expect(appSource.contains("GameChangersMenuBarLogo") == false)
     }
 
     @Test("command-line parser accepts restore only as the exact mutation mode")

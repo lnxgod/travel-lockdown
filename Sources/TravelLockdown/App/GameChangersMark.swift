@@ -7,58 +7,6 @@ enum GameChangersMarkState: Equatable, Sendable {
     case attention
 }
 
-/// The official square logo at menu-bar size, with a small independent status dot.
-/// Keeping the full-color source artwork avoids the joystick silhouette collapsing
-/// into an ambiguous plus sign when macOS renders it at status-item scale.
-struct GameChangersMenuBarLogo: View {
-    let size: CGFloat
-    var state: GameChangersMarkState = .off
-
-    var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            Group {
-                if let image = GameChangersAssets.menuBarLogo {
-                    Image(nsImage: image)
-                        .interpolation(.high)
-                        .renderingMode(.original)
-                } else {
-                    Image(systemName: "arcade.stick.console.fill")
-                        .resizable()
-                        .scaledToFit()
-                        .foregroundStyle(.primary)
-                        .padding(2)
-                }
-            }
-            .scaledToFit()
-            .frame(width: size, height: size)
-
-            if state != .off {
-                Circle()
-                    .fill(stateColor)
-                    .overlay {
-                        Circle().stroke(.black.opacity(0.85), lineWidth: 1)
-                    }
-                    .frame(width: 6, height: 6)
-                    .offset(x: 1, y: 1)
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("GameChangers AI")
-    }
-
-    private var stateColor: Color {
-        switch state {
-        case .active:
-            Color(red: 0, green: 1, blue: 0.533)
-        case .attention:
-            .orange
-        case .off:
-            .clear
-        }
-    }
-}
-
 /// The official GameChangers AI lockup used inside the menu panel.
 struct GameChangersBrandLogo: View {
     let size: CGFloat
@@ -171,12 +119,4 @@ private enum GameChangersAssets {
         return NSImage(contentsOf: mainURL)
     }()
 
-    static let menuBarLogo: NSImage? = {
-        guard let image = logo?.copy() as? NSImage else {
-            return nil
-        }
-        image.size = NSSize(width: 18, height: 18)
-        image.isTemplate = false
-        return image
-    }()
 }

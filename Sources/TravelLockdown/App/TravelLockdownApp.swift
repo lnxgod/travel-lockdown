@@ -43,27 +43,50 @@ struct TravelLockdownApp: App {
         MenuBarExtra {
             MenuView(model: model)
         } label: {
-            GameChangersMenuBarLogo(size: 18, state: menuBarMarkState)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Travel Lockdown")
-                .help("Travel Lockdown by GameChangers AI")
+            Label(menuBarPresentation.title, systemImage: menuBarPresentation.systemImage)
+                .help(menuBarPresentation.helpText)
         }
         .menuBarExtraStyle(.window)
     }
 
-    private var menuBarMarkState: GameChangersMarkState {
-        switch model.lockdownModeState {
-        case .verified:
-            return .active
-        case .attention:
-            return .attention
-        case .off:
-            break
+    private var menuBarPresentation: MenuBarPresentation {
+        MenuBarPresentation.make(
+            state: model.lockdownModeState,
+            hasOperationAttention: model.operationAttention != nil
+        )
+    }
+}
+
+struct MenuBarPresentation: Equatable, Sendable {
+    let title: String
+    let systemImage: String
+    let helpText: String
+
+    static func make(
+        state: LockdownModeState,
+        hasOperationAttention: Bool
+    ) -> MenuBarPresentation {
+        if hasOperationAttention || state == .attention {
+            return MenuBarPresentation(
+                title: "Travel Lockdown",
+                systemImage: "exclamationmark.shield.fill",
+                helpText: "Travel Lockdown needs attention"
+            )
         }
-        if model.operationAttention != nil {
-            return .attention
+
+        if state == .verified {
+            return MenuBarPresentation(
+                title: "Travel Lockdown",
+                systemImage: "lock.shield.fill",
+                helpText: "Travel Lockdown is on and verified"
+            )
         }
-        return .off
+
+        return MenuBarPresentation(
+            title: "Travel Lockdown",
+            systemImage: "lock.shield",
+            helpText: "Open Travel Lockdown status and preflight"
+        )
     }
 }
 

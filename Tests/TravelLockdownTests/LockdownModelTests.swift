@@ -8,6 +8,26 @@ func initialMenuStateIsUnlocked() {
     #expect(status.isActive == false)
 }
 
+@Test("menu-bar presentation exposes ready, verified, and attention states")
+func menuBarPresentationTracksLockdownState() {
+    let ready = MenuBarPresentation.make(state: .off, hasOperationAttention: false)
+    #expect(ready.systemImage == "lock.shield")
+    #expect(ready.helpText.contains("status and preflight"))
+
+    let verified = MenuBarPresentation.make(state: .verified, hasOperationAttention: false)
+    #expect(verified.systemImage == "lock.shield.fill")
+    #expect(verified.helpText.contains("on and verified"))
+
+    let attention = MenuBarPresentation.make(state: .attention, hasOperationAttention: false)
+    #expect(attention.systemImage == "exclamationmark.shield.fill")
+
+    let operationFailure = MenuBarPresentation.make(
+        state: .off,
+        hasOperationAttention: true
+    )
+    #expect(operationFailure == attention)
+}
+
 @Test("a single unavailable required control prevents an active lockdown state")
 func incompleteControlsCannotProduceLockedState() {
     let status = LockdownStatus.make(
