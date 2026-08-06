@@ -67,6 +67,80 @@ struct BaselineStoreTests {
         #expect(try store.load() == baseline)
     }
 
+    @Test("prepared recovery state round-trips and legacy state defaults active")
+    func recoveryStateRoundTripsWithSafeLegacyDefault() throws {
+        let preparedDirectory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: preparedDirectory) }
+        let preparedStore = BaselineStore(
+            directory: preparedDirectory,
+            modelRegistry: textSnapshotRegistry()
+        )
+        let prepared = LockdownBaseline(
+            version: 1,
+            capturedAt: Date(timeIntervalSince1970: 1),
+            snapshots: [
+                try ControlSnapshot.capturing(
+                    TextSnapshot(value: "reviewed"),
+                    for: .bluetooth
+                )
+            ],
+            recoveryState: .prepared
+        )
+        try preparedStore.save(prepared)
+        #expect(try preparedStore.load() == prepared)
+
+        let legacyDirectory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: legacyDirectory) }
+        let encoded = try JSONEncoder().encode(
+            LockdownBaseline(
+                version: 1,
+                capturedAt: Date(timeIntervalSince1970: 2),
+                snapshots: prepared.snapshots,
+                recoveryState: .active
+            )
+        )
+        var legacyObject = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "recoveryState")
+        try JSONSerialization.data(withJSONObject: legacyObject).write(
+            to: legacyDirectory.appendingPathComponent("baseline.json")
+        )
+        let legacyStore = BaselineStore(
+            directory: legacyDirectory,
+            modelRegistry: textSnapshotRegistry()
+        )
+
+        #expect(try legacyStore.load().recoveryState == .active)
+    }
+
+    @Test("only an unchanged prepared snapshot can be discarded")
+    func preparedRemovalIsStateAndIdentityBound() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = BaselineStore(directory: directory, modelRegistry: textSnapshotRegistry())
+        let prepared = LockdownBaseline(
+            version: 1,
+            capturedAt: Date(timeIntervalSince1970: 1),
+            snapshots: [
+                try ControlSnapshot.capturing(TextSnapshot(value: "reviewed"), for: .bluetooth)
+            ],
+            recoveryState: .prepared
+        )
+        try store.save(prepared)
+        let mismatched = LockdownBaseline(
+            version: prepared.version,
+            capturedAt: Date(timeIntervalSince1970: 2),
+            snapshots: prepared.snapshots,
+            recoveryState: .prepared
+        )
+
+        #expect(try store.removePrepared(matching: mismatched) == false)
+        #expect(store.exists)
+        #expect(try store.removePrepared(matching: prepared))
+        #expect(store.exists == false)
+    }
+
     @Test("baseline rejects a payload marked as a credential")
     func baselineRejectsCredentialPayload() throws {
         let baseline = LockdownBaseline(

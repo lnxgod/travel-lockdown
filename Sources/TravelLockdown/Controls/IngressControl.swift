@@ -71,9 +71,20 @@ enum SharingService: String, CaseIterable, Codable, Hashable, Sendable {
 struct SharingRecoveryMarker: Codable, Equatable, Sendable {
     let service: SharingService
     let recovery: ManualRecoveryMarker
+    let isEnabled: Bool?
+
+    init(
+        service: SharingService,
+        recovery: ManualRecoveryMarker = .unresolved,
+        isEnabled: Bool? = nil
+    ) {
+        self.service = service
+        self.recovery = recovery
+        self.isEnabled = isEnabled
+    }
 
     static let allUnresolved = SharingService.allCases.map {
-        SharingRecoveryMarker(service: $0, recovery: .unresolved)
+        SharingRecoveryMarker(service: $0)
     }
 }
 
@@ -240,11 +251,27 @@ struct IngressControl: LockdownControl {
                 && $0.stealthModeEnabled == captured.stealthModeEnabled
                 && $0.blockAllEnabled == captured.blockAllEnabled
         } ?? false
+        let reviewed = captured.sharingRecovery.filter { $0.isEnabled != nil }
+        if reviewed.count == SharingService.allCases.count {
+            let actions = reviewed.map {
+                "Turn \($0.service.rawValue) \($0.isEnabled == true ? "on" : "off")"
+            }.joined(separator: "; ")
+            return RestorationStatus(
+                id: id,
+                matchesSnapshot: firewallMatches,
+                detail: actions,
+                manualRecovery: ManualRecoveryInstruction(
+                    pane: "System Settings > General > Sharing",
+                    action: actions,
+                    confirmation: .userAttestation
+                )
+            )
+        }
         let unresolved = captured.sharingRecovery.filter { $0.recovery == .unresolved }
         if !unresolved.isEmpty {
             return RestorationStatus(
                 id: id,
-                matchesSnapshot: false,
+                matchesSnapshot: firewallMatches,
                 detail: nativeActions(for: unresolved.map(\.service)),
                 manualRecovery: ManualRecoveryInstruction(
                     pane: "System Settings > General > Sharing",

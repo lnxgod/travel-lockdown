@@ -6,7 +6,7 @@
 
 **A free, open-source GameChangers AI menu-bar tool for a quieter Mac while traveling.**
 
-Travel Lockdown keeps Wi-Fi available for deliberate manual connections while reducing routine radio, discovery, auto-join, inbound-network, sharing, and wake exposure. It captures an owner-only, non-credential recovery baseline before applying anything and keeps recovery inside the same menu-bar switch.
+Travel Lockdown keeps Wi-Fi available for deliberate manual connections while reducing routine radio, discovery, auto-join, inbound-network, sharing, and wake exposure. Before Lockdown can turn on, it requires an owner-only, non-credential recovery snapshot that you review while the Mac is clearly in its normal posture. Recovery stays inside the same menu-bar switch.
 
 > [!IMPORTANT]
 > This project is not Apple's Lockdown Mode, is not affiliated with Apple, and is not an anonymity or air-gap guarantee. It changes an explicit set of local controls; hardware, macOS, and third-party software can have behavior outside that boundary.
@@ -50,6 +50,12 @@ Before opening the app, you can run the read-only status path:
 swift run TravelLockdown --status --dry-run
 ```
 
+You can also print a redacted, read-only recovery review. Saved Wi-Fi names are never printed:
+
+```zsh
+swift run TravelLockdown --review-recovery
+```
+
 Then launch the app:
 
 ```zsh
@@ -60,14 +66,19 @@ open build/TravelLockdown.app
 
 Click the GameChangers logo in the menu bar.
 
-1. Turn **Lockdown Mode** on.
-2. Review the in-panel dry-run plan. Nothing has changed at this point.
-3. Continue to the separate impact confirmation.
-4. Choose **Enable Lockdown** only when you are ready.
+1. Choose **Set Up Recovery Snapshot** while the Mac is in its normal posture.
+2. Review the redacted automatic settings and record the normal AirPlay Receiver, Personal Hotspot auto-join, and Sharing values that macOS requires you to manage manually.
+3. Choose **Save Reviewed Snapshot**. This creates a verified, prepared snapshot without changing any setting.
+4. Turn **Lockdown Mode** on and review the in-panel dry-run plan. Nothing has changed at this point.
+5. Continue to the separate impact confirmation, then choose **Enable Lockdown** only when you are ready.
+
+The coordinator checks for a complete, clearly unlocked status before review, before save, and after save. It refuses to create a new recovery target from settings that already appear locked or ambiguous. A prepared snapshot must still exactly match the Mac before activation; it is promoted to active recovery state before the first lockdown mutation.
 
 The switch stays left when off, moves right and green only when every registered control verifies, and rests in the center with an orange warning when recovery state exists but verification is incomplete.
 
 To recover, turn the same switch off and confirm **Restore Normal State**. If recovery is partial, keep the app and its baseline installed and complete the listed System Settings steps. Dismissing a manual instruction never marks it restored.
+
+Older snapshots that did not record the manual settings are retained until all automatic values restore. The app then offers **Review Missing Recovery Settings** and atomically replaces the old active snapshot with a reviewed prepared snapshot; any failed check leaves the old snapshot unchanged.
 
 ## Emergency recovery
 
@@ -79,9 +90,24 @@ If the menu UI is unavailable, the adjacent wrapper invokes the same confirmed r
 
 Cancellation, an error, a changed baseline, a partial result, or failed verification exits nonzero and preserves the baseline for another attempt.
 
+For headless recovery setup, first run `--review-recovery`, then pass its fresh 64-character token and every visible manual choice:
+
+```zsh
+swift run TravelLockdown --prepare-recovery \
+  --review-token TOKEN \
+  --airplay on \
+  --airplay-access current-user \
+  --airplay-password required \
+  --hotspot ask-to-join \
+  --sharing all-off \
+  --confirmed
+```
+
+The accepted alternatives are `on|off`, `current-user|same-network|everyone`, `required|not-required`, `never|ask-to-join|automatic`, and `all-off|all-on`. A stale token, an ambiguous posture, or any setting drift fails without creating a snapshot.
+
 ## Known limitations
 
-- Personal Hotspot auto-join, AirPlay Receiver, and Sharing services remain manual/unresolved where macOS provides no complete supported readback. Recovery can remain incomplete until those steps are handled.
+- Personal Hotspot auto-join, AirPlay Receiver, and Sharing services require explicit user review and restoration where macOS provides no complete supported readback. New snapshots bind those chosen values to recovery and require explicit completion attestation. Older snapshots with unresolved values use the in-app legacy replacement flow and are never silently treated as complete.
 - The allowlisted firewall and wake path currently uses a legacy Authorization Services mechanism. If macOS does not support it, the app reports the control as unverified instead of claiming success.
 - Removing remembered Wi-Fi profiles does not export or recreate passwords. Restoration rebuilds only the public profile metadata and relies on identities already present in the user's Keychain.
 - Turning Bluetooth off affects Bluetooth accessories and Apple Watch Auto Unlock.

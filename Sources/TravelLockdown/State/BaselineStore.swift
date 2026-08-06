@@ -165,6 +165,37 @@ struct LockdownBaseline: Codable, Equatable, Sendable {
     let version: Int
     let capturedAt: Date
     let snapshots: [ControlSnapshot]
+    let recoveryState: RecoveryState
+
+    init(
+        version: Int,
+        capturedAt: Date,
+        snapshots: [ControlSnapshot],
+        recoveryState: RecoveryState = .active
+    ) {
+        self.version = version
+        self.capturedAt = capturedAt
+        self.snapshots = snapshots
+        self.recoveryState = recoveryState
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case capturedAt
+        case snapshots
+        case recoveryState
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        capturedAt = try container.decode(Date.self, forKey: .capturedAt)
+        snapshots = try container.decode([ControlSnapshot].self, forKey: .snapshots)
+        recoveryState = try container.decodeIfPresent(
+            RecoveryState.self,
+            forKey: .recoveryState
+        ) ?? .active
+    }
 }
 
 struct RestorationStatus: Equatable, Sendable {
@@ -189,12 +220,24 @@ struct RestorationStatus: Equatable, Sendable {
 struct RestoreResult: Equatable, Sendable {
     let expectedIDs: Set<ControlID>
     let statuses: [RestorationStatus]
+    let recoveryToken: String?
+
+    init(
+        expectedIDs: Set<ControlID>,
+        statuses: [RestorationStatus],
+        recoveryToken: String? = nil
+    ) {
+        self.expectedIDs = expectedIDs
+        self.statuses = statuses
+        self.recoveryToken = recoveryToken
+    }
 
     var isFullyRestored: Bool {
         !expectedIDs.isEmpty
             && statuses.count == expectedIDs.count
             && Set(statuses.map(\.id)) == expectedIDs
             && Set(statuses.filter(\.matchesSnapshot).map(\.id)) == expectedIDs
+            && statuses.allSatisfy { $0.manualRecovery == nil }
     }
 }
 
@@ -307,6 +350,10 @@ final class BaselineTransaction: @unchecked Sendable {
         try store.removeAfterVerifiedRestoreUnlocked(result, matching: baseline)
     }
 
+    func removePrepared(matching baseline: LockdownBaseline) throws -> Bool {
+        try store.removePreparedUnlocked(matching: baseline)
+    }
+
     func release() {
         lock.release()
     }
@@ -358,6 +405,12 @@ struct BaselineStore: Sendable {
         return try transaction.removeAfterVerifiedRestore(result, matching: baseline)
     }
 
+    func removePrepared(matching baseline: LockdownBaseline) throws -> Bool {
+        let transaction = try beginExclusiveTransaction()
+        defer { transaction.release() }
+        return try transaction.removePrepared(matching: baseline)
+    }
+
     func beginExclusiveTransaction() throws -> BaselineTransaction {
         BaselineTransaction(
             store: self,
@@ -379,7 +432,8 @@ struct BaselineStore: Sendable {
         let canonicalBaseline = LockdownBaseline(
             version: baseline.version,
             capturedAt: baseline.capturedAt,
-            snapshots: try baseline.snapshots.map(modelRegistry.canonicalized)
+            snapshots: try baseline.snapshots.map(modelRegistry.canonicalized),
+            recoveryState: baseline.recoveryState
         )
         try Self.validate(canonicalBaseline)
 
@@ -420,7 +474,21 @@ struct BaselineStore: Sendable {
         )
     }
 
+    fileprivate func removePreparedUnlocked(matching baseline: LockdownBaseline) throws -> Bool {
+        guard baseline.recoveryState == .prepared,
+              exists,
+              try loadUnlocked() == baseline else {
+            return false
+        }
+        try FileManager.default.removeItem(at: baselineURL)
+        return !exists
+    }
+
     static func validate(_ baseline: LockdownBaseline) throws {
+        guard baseline.version == 1,
+              baseline.recoveryState != .none else {
+            throw BaselineStoreError.invalidSnapshotPayload
+        }
         for snapshot in baseline.snapshots {
             try validatePayload(snapshot.payload)
         }

@@ -87,6 +87,7 @@ struct WiFiPolicySnapshot: DeclaredNonSecretSnapshotModel, Equatable {
     let requireAdministratorForPower: Bool
     let requireAdministratorForIBSSMode: Bool
     let personalHotspotRecovery: ManualRecoveryMarker
+    let personalHotspotAutoJoin: PersonalHotspotAutoJoinMode?
 
     init(
         preferredNetworks: [WiFiNetworkProfileMetadata],
@@ -94,7 +95,8 @@ struct WiFiPolicySnapshot: DeclaredNonSecretSnapshotModel, Equatable {
         requireAdministratorForAssociation: Bool,
         requireAdministratorForPower: Bool,
         requireAdministratorForIBSSMode: Bool,
-        personalHotspotRecovery: ManualRecoveryMarker = .unresolved
+        personalHotspotRecovery: ManualRecoveryMarker = .unresolved,
+        personalHotspotAutoJoin: PersonalHotspotAutoJoinMode? = nil
     ) {
         self.preferredNetworks = preferredNetworks
         self.rememberJoinedNetworks = rememberJoinedNetworks
@@ -102,6 +104,7 @@ struct WiFiPolicySnapshot: DeclaredNonSecretSnapshotModel, Equatable {
         self.requireAdministratorForPower = requireAdministratorForPower
         self.requireAdministratorForIBSSMode = requireAdministratorForIBSSMode
         self.personalHotspotRecovery = personalHotspotRecovery
+        self.personalHotspotAutoJoin = personalHotspotAutoJoin
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
@@ -111,6 +114,7 @@ struct WiFiPolicySnapshot: DeclaredNonSecretSnapshotModel, Equatable {
         case requireAdministratorForPower
         case requireAdministratorForIBSSMode
         case personalHotspotRecovery
+        case personalHotspotAutoJoin
     }
 
     init(from decoder: any Decoder) throws {
@@ -137,6 +141,10 @@ struct WiFiPolicySnapshot: DeclaredNonSecretSnapshotModel, Equatable {
             ManualRecoveryMarker.self,
             forKey: .personalHotspotRecovery
         ) ?? .unresolved
+        personalHotspotAutoJoin = try container.decodeIfPresent(
+            PersonalHotspotAutoJoinMode.self,
+            forKey: .personalHotspotAutoJoin
+        )
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -153,6 +161,7 @@ struct WiFiPolicySnapshot: DeclaredNonSecretSnapshotModel, Equatable {
             forKey: .requireAdministratorForIBSSMode
         )
         try container.encode(personalHotspotRecovery, forKey: .personalHotspotRecovery)
+        try container.encodeIfPresent(personalHotspotAutoJoin, forKey: .personalHotspotAutoJoin)
     }
 }
 
@@ -554,10 +563,22 @@ struct WiFiPolicyControl: LockdownControl {
             && current.requireAdministratorForPower == captured.requireAdministratorForPower
             && current.requireAdministratorForIBSSMode
                 == captured.requireAdministratorForIBSSMode
+        if let hotspotMode = captured.personalHotspotAutoJoin {
+            return RestorationStatus(
+                id: id,
+                matchesSnapshot: automatedMatches,
+                detail: "Set Ask to join hotspots to \(hotspotMode.title)",
+                manualRecovery: ManualRecoveryInstruction(
+                    pane: "System Settings > Wi-Fi",
+                    action: "Set Ask to join hotspots to \(hotspotMode.title)",
+                    confirmation: .userAttestation
+                )
+            )
+        }
         if captured.personalHotspotRecovery == .unresolved {
             return RestorationStatus(
                 id: id,
-                matchesSnapshot: false,
+                matchesSnapshot: automatedMatches,
                 detail: "Restore Personal Hotspot auto-join in System Settings > Wi-Fi",
                 manualRecovery: ManualRecoveryInstruction(
                     pane: "System Settings > Wi-Fi",

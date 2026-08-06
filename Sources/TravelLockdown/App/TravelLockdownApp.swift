@@ -6,9 +6,11 @@ import SwiftUI
 @main
 @MainActor
 enum TravelLockdownLauncher {
-    static func main() {
+    static func main() async {
         guard let mode = CommandLineMode.parse(ProcessInfo.processInfo.arguments) else {
-            let usage = Data("Usage: TravelLockdown [--status --dry-run | --restore]\n".utf8)
+            let usageText = "Usage: TravelLockdown [--status --dry-run | --review-recovery | "
+                + "--prepare-recovery --review-token TOKEN ... --confirmed | --restore]\n"
+            let usage = Data(usageText.utf8)
             try? FileHandle.standardError.write(contentsOf: usage)
             exit(2)
         }
@@ -19,6 +21,22 @@ enum TravelLockdownLauncher {
         case .statusDryRun:
             ReadOnlyCommandLine.printStatus(using: ProcessCommandRunner())
             exit(0)
+        case .reviewRecovery:
+            let coordinator = LockdownRuntime.makeCoordinator()
+            let exitCode = await RecoveryReviewCommandLine.run(
+                review: { try await coordinator.reviewRecoverySetup() }
+            )
+            exit(exitCode)
+        case .prepareRecovery(let profile, let reviewToken):
+            let coordinator = LockdownRuntime.makeCoordinator()
+            let exitCode = await RecoverySetupCommandLine.run(
+                profile: profile,
+                reviewToken: reviewToken,
+                prepare: {
+                    try await coordinator.prepareRecovery(profile: $0, reviewToken: $1)
+                }
+            )
+            exit(exitCode)
         case .restore:
             RestoreCommandApplication.run()
         }

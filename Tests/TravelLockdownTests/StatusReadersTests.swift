@@ -74,6 +74,8 @@ struct StatusReadersTests {
         #expect(StatusReaders.firewallGlobal("Firewall is disabled. (State = 0)\n") == false)
         #expect(StatusReaders.firewallStealth("Stealth mode enabled\n") == true)
         #expect(StatusReaders.firewallStealth("Stealth mode disabled\n") == false)
+        #expect(StatusReaders.firewallStealth("Firewall stealth mode is on\n") == true)
+        #expect(StatusReaders.firewallStealth("Firewall stealth mode is off\n") == false)
         #expect(
             StatusReaders.firewallBlockAll(
                 "Firewall is set to block all non-essential incoming connections\n"
@@ -90,6 +92,16 @@ struct StatusReadersTests {
             ) == false
         )
         #expect(StatusReaders.firewallBlockAll("Block all DISABLED!\n") == false)
+        #expect(
+            StatusReaders.firewallBlockAll(
+                "Firewall has block all state set to enabled.\n"
+            ) == true
+        )
+        #expect(
+            StatusReaders.firewallBlockAll(
+                "Firewall has block all state set to disabled.\n"
+            ) == false
+        )
     }
 
     @Test("unknown numeric firewall states fail closed")

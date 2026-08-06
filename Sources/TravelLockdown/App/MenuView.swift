@@ -111,6 +111,11 @@ struct MenuView: View {
             )
         } else {
             switch model.operationPhase {
+            case .preparingRecovery:
+                progressCard(
+                    title: "Preparing recovery snapshot",
+                    detail: "Reading settings twice for a stable review. Nothing is being changed."
+                )
             case .preparingPlan:
                 progressCard(
                     title: "Preparing lockdown plan",
@@ -127,7 +132,9 @@ struct MenuView: View {
                     detail: "Comparing every supported setting with the captured baseline."
                 )
             case .idle:
-                if let review = model.pendingPlanReview {
+                if model.isRecoverySetupPresented {
+                    recoverySetupCard
+                } else if let review = model.pendingPlanReview {
                     actionCard(title: review.title, symbol: "list.clipboard") {
                         if review.plan.changes.isEmpty {
                             Text("No changes are currently planned.")
@@ -190,6 +197,129 @@ struct MenuView: View {
         }
     }
 
+    private var recoverySetupCard: some View {
+        actionCard(
+            title: model.recoverySetupReview?.purpose == .legacyReplacement
+                ? "Finish Legacy Recovery"
+                : "Set Up Recovery Snapshot",
+            symbol: "externaldrive.badge.checkmark"
+        ) {
+            Text(
+                model.recoverySetupReview?.purpose == .legacyReplacement
+                    ? "The older snapshot preserved and restored its automatic values, but did "
+                        + "not record AirPlay, Personal Hotspot, or Sharing. Choose those normal "
+                        + "values now. The old snapshot stays intact unless verification succeeds."
+                    : "Automatic settings are captured exactly. Review the settings macOS requires "
+                        + "you to restore manually. No Wi-Fi, Bluetooth, or security setting changes "
+                        + "when this snapshot is saved."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if let review = model.recoverySetupReview {
+                GroupBox("Current automatic settings") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(review.items.enumerated()), id: \.offset) { _, item in
+                            Label(item.summary, systemImage: "checkmark.circle")
+                                .font(.caption)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Text(
+                    "These exact values will be re-read before saving and again before Lockdown "
+                        + "can turn on. If anything changes, setup stops instead of guessing."
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Toggle(
+                "AirPlay Receiver normally on",
+                isOn: Binding(
+                    get: { model.recoverySetupProfile.airPlayReceiver.isEnabled },
+                    set: { model.setAirPlayReceiverEnabled($0) }
+                )
+            )
+            if model.recoverySetupProfile.airPlayReceiver.isEnabled {
+                Picker(
+                    "AirPlay access",
+                    selection: Binding(
+                        get: { model.recoverySetupProfile.airPlayReceiver.access },
+                        set: { model.setAirPlayReceiverAccess($0) }
+                    )
+                ) {
+                    ForEach(AirPlayReceiverAccess.allCases, id: \.self) { access in
+                        Text(access.title).tag(access)
+                    }
+                }
+                Toggle(
+                    "AirPlay normally requires a password",
+                    isOn: Binding(
+                        get: {
+                            model.recoverySetupProfile.airPlayReceiver.requiresPassword
+                        },
+                        set: { model.setAirPlayReceiverPasswordRequired($0) }
+                    )
+                )
+            }
+
+            Picker(
+                "Personal Hotspot auto-join",
+                selection: Binding(
+                    get: { model.recoverySetupProfile.personalHotspotAutoJoin },
+                    set: { model.setPersonalHotspotAutoJoin($0) }
+                )
+            ) {
+                ForEach(PersonalHotspotAutoJoinMode.allCases, id: \.self) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+
+            DisclosureGroup("Normal Sharing services") {
+                ForEach(SharingService.allCases, id: \.self) { service in
+                    Toggle(
+                        service.rawValue,
+                        isOn: Binding(
+                            get: {
+                                model.recoverySetupProfile.sharingServices[service] == true
+                            },
+                            set: { model.setSharingService(service, enabled: $0) }
+                        )
+                    )
+                }
+            }
+
+            Text(
+                "The snapshot stores Wi-Fi profile metadata for restoration, never passwords "
+                    + "or authentication tokens. Touch ID, passwords, accounts, and FileVault "
+                    + "are not changed."
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Button("Cancel") {
+                    model.cancelRecoverySetup()
+                }
+                Spacer()
+                Button(
+                    model.recoverySetupReview?.purpose == .legacyReplacement
+                        ? "Finish Recovery & Prepare Snapshot"
+                        : "Save Reviewed Snapshot"
+                ) {
+                    model.confirmRecoverySetup()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .accessibilityIdentifier("recovery-setup-card")
+    }
+
     private func progressCard(title: String, detail: String) -> some View {
         HStack(spacing: 10) {
             ProgressView()
@@ -248,19 +378,46 @@ struct MenuView: View {
 
     @ViewBuilder
     private var recoveryAttention: some View {
-        if model.lockdownModeState == .unmanaged {
+        if model.recoveryState == .prepared,
+           model.preparedRecoveryMatchesCurrent != true {
             VStack(alignment: .leading, spacing: 6) {
-                Label("Recovery snapshot missing", systemImage: "exclamationmark.shield.fill")
+                Label("Prepared snapshot needs a fresh review", systemImage: "arrow.triangle.2.circlepath")
                     .font(.subheadline.weight(.semibold))
                 Text(
-                    "Lockdown-like or unverifiable settings were detected, but no recovery "
-                        + "baseline exists. Automatic restore cannot safely reconstruct the "
-                        + "previous settings. Restore baseline.json from Time Machine for exact "
-                        + "recovery, or review the Status results manually."
+                    "Current settings no longer exactly match the prepared snapshot, or they "
+                        + "could not be verified. Lockdown remains disabled until it is rebuilt."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+                Button("Rebuild Recovery Snapshot") {
+                    model.rebuildPreparedRecovery()
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("rebuild-recovery-snapshot")
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+            .accessibilityIdentifier("stale-recovery-baseline")
+        } else if model.recoveryState == .none,
+                  model.lockdownModeState == .unmanaged {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Recovery snapshot missing", systemImage: "exclamationmark.shield.fill")
+                    .font(.subheadline.weight(.semibold))
+                Text(
+                    "A recovery baseline is not available. Establish a reviewed normal-state "
+                        + "snapshot before Lockdown can be enabled."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                Button("Set Up Recovery Snapshot") {
+                    model.presentRecoverySetup()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.isRecoverySetupPresented)
+                .accessibilityIdentifier("setup-recovery-snapshot")
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -288,8 +445,28 @@ struct MenuView: View {
                 Text(Self.manualRecoveryText(for: instruction))
                     .font(.caption)
             }
-            Button("Acknowledge Manual Recovery") {
-                model.acknowledgeManualRecovery()
+            if prompt.canConfirmCompletion {
+                Button("I Completed These Settings") {
+                    model.confirmManualRecoveryCompletion()
+                }
+            } else {
+                Text(
+                    "This older snapshot did not record the exact prior values for these settings. "
+                        + "Review the values you want as normal to finish recovery safely."
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Dismiss") {
+                        model.acknowledgeManualRecovery()
+                    }
+                    Spacer()
+                    Button("Review Missing Recovery Settings") {
+                        model.presentRecoverySetup()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
             }
         }
     }
@@ -387,6 +564,8 @@ struct MenuView: View {
             return model.lockdownModeState == .off ? "ERROR" : "ATTENTION"
         }
         switch model.operationPhase {
+        case .preparingRecovery:
+            return "CAPTURING"
         case .preparingPlan:
             return "PLANNING"
         case .enabling:
@@ -400,7 +579,7 @@ struct MenuView: View {
             case .attention:
                 return "ATTENTION"
             case .unmanaged:
-                return "UNMANAGED"
+                return model.recoveryState == .prepared ? "CHANGED" : "UNMANAGED"
             case .off:
                 return "READY"
             }
@@ -415,6 +594,8 @@ struct MenuView: View {
             return "Refreshing status without changing settings…"
         }
         switch model.operationPhase {
+        case .preparingRecovery:
+            return "Capturing a reviewed recovery snapshot without changing settings…"
         case .preparingPlan:
             return "Preparing a read-only plan…"
         case .enabling:
@@ -440,9 +621,13 @@ struct MenuView: View {
             case .attention:
                 return "Recovery state exists; review the attention items below."
             case .unmanaged:
-                return "Current posture is unknown and no recovery snapshot is available."
+                return model.recoveryState == .prepared
+                    ? "The prepared snapshot needs a fresh review before Lockdown can turn on."
+                    : "Set up a reviewed recovery snapshot before enabling Lockdown."
             case .off:
-                return "Turn on to stop auto-join while keeping Wi-Fi available."
+                return model.recoveryState == .prepared
+                    ? "Recovery snapshot ready. Turn on when you are ready to travel."
+                    : "Turn on to stop auto-join while keeping Wi-Fi available."
             }
         }
     }
@@ -491,7 +676,9 @@ struct MenuView: View {
         case .attention:
             "Indeterminate; recovery attention required"
         case .unmanaged:
-            "Unmanaged; recovery snapshot missing"
+            model.recoveryState == .prepared
+                ? "Prepared snapshot changed or could not be verified"
+                : "Unmanaged; recovery snapshot missing"
         }
     }
 
@@ -502,7 +689,9 @@ struct MenuView: View {
         case .verified, .attention:
             "Starts confirmed recovery"
         case .unmanaged:
-            "Automatic changes are unavailable without a recovery snapshot"
+            model.recoveryState == .prepared
+                ? "Rebuild the recovery snapshot before activation"
+                : "Automatic changes are unavailable without a recovery snapshot"
         }
     }
 }

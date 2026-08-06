@@ -67,6 +67,38 @@ struct PackagingTests {
         #expect(CommandLineMode.parse(["TravelLockdown", "--lockdown"]) == nil)
     }
 
+    @Test("recovery CLI requires a prior review token and exact visible confirmation")
+    func recoveryCLIRequiresBoundReview() {
+        let token = String(repeating: "a", count: 64)
+        let exact = [
+            "TravelLockdown", "--prepare-recovery",
+            "--review-token", token,
+            "--airplay", "on",
+            "--airplay-access", "current-user",
+            "--airplay-password", "required",
+            "--hotspot", "ask-to-join",
+            "--sharing", "all-off",
+            "--confirmed"
+        ]
+
+        guard case .prepareRecovery(let profile, let parsedToken) = CommandLineMode.parse(exact) else {
+            Issue.record("Exact reviewed recovery command did not parse")
+            return
+        }
+        #expect(parsedToken == token)
+        #expect(profile.airPlayReceiver.isEnabled)
+        #expect(profile.airPlayReceiver.access == .currentUser)
+        #expect(profile.airPlayReceiver.requiresPassword)
+        #expect(profile.personalHotspotAutoJoin == .askToJoin)
+        #expect(profile.sharingServices.values.allSatisfy { $0 == false })
+        #expect(CommandLineMode.parse(["TravelLockdown", "--review-recovery"]) == .reviewRecovery)
+        #expect(CommandLineMode.parse(Array(exact.dropLast())) == nil)
+
+        var badToken = exact
+        badToken[3] = "not-a-review-token"
+        #expect(CommandLineMode.parse(badToken) == nil)
+    }
+
     @Test("recovery helper rejects every invocation except exact confirmation")
     func recoveryHelperRequiresExactConfirmation() throws {
         let script = packageRoot.appendingPathComponent("scripts/recover-travel-lockdown.sh")

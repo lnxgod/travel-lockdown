@@ -76,7 +76,7 @@ struct ViewModelTests {
         #expect(coordinator.restoreCount == 0)
     }
 
-    @Test("a complete normal posture remains eligible for a read-only enable plan")
+    @Test("normal-looking settings still require a reviewed recovery snapshot")
     @MainActor
     func clearlyUnlockedPostureCanPrepareEnablePlan() async {
         let normalStatus = LockdownStatus.make(controls: ControlID.allCases.map {
@@ -90,12 +90,67 @@ struct ViewModelTests {
 
         await model.refreshStatus()
         let task = model.requestLockdownModeToggle()
-        await task?.value
 
-        #expect(model.lockdownModeState == .off)
-        #expect(model.pendingPlanReview != nil)
-        #expect(coordinator.enableDryRuns == [true])
+        #expect(task == nil)
+        #expect(model.lockdownModeState == .unmanaged)
+        #expect(model.pendingPlanReview == nil)
+        #expect(coordinator.enableDryRuns.isEmpty)
         #expect(coordinator.restoreCount == 0)
+    }
+
+    @Test("recovery setup previews automatic values before saving a prepared snapshot")
+    @MainActor
+    func recoverySetupRequiresVisibleReview() async {
+        let coordinator = RecoverySetupFakeCoordinator()
+        let model = LockdownViewModel(
+            coordinator: coordinator,
+            preflightProvider: FakePreflightProvider()
+        )
+        await model.beginStartupHydration()?.value
+
+        let reviewTask = model.presentRecoverySetup()
+        await reviewTask?.value
+
+        #expect(model.isRecoverySetupPresented)
+        #expect(model.recoverySetupReview?.items.count == 5)
+        #expect(model.recoveryState == .none)
+        #expect(model.isLockdownModeToggleDisabled)
+        #expect(await coordinator.mutationCounts() == (prepare: 0, enable: 0, restore: 0))
+
+        let saveTask = model.confirmRecoverySetup()
+        await saveTask?.value
+
+        #expect(model.recoveryState == .prepared)
+        #expect(model.preparedRecoveryMatchesCurrent == true)
+        #expect(model.lockdownModeState == .off)
+        #expect(model.isLockdownModeToggleDisabled == false)
+        #expect(await coordinator.mutationCounts() == (prepare: 1, enable: 0, restore: 0))
+    }
+
+    @Test("a drifted prepared snapshot disables activation and can be rebuilt")
+    @MainActor
+    func driftedPreparedSnapshotCanBeRebuilt() async {
+        let coordinator = RecoverySetupFakeCoordinator(
+            recoveryState: .prepared,
+            preparedMatches: false
+        )
+        let model = LockdownViewModel(
+            coordinator: coordinator,
+            preflightProvider: FakePreflightProvider()
+        )
+        await model.beginStartupHydration()?.value
+
+        #expect(model.lockdownModeState == .unmanaged)
+        #expect(model.isLockdownModeToggleDisabled)
+        #expect(model.requestLockdownModeToggle() == nil)
+
+        let rebuild = model.rebuildPreparedRecovery()
+        await rebuild?.value
+
+        #expect(model.isRecoverySetupPresented)
+        #expect(model.recoveryState == .none)
+        #expect(await coordinator.discardCount() == 1)
+        #expect(await coordinator.mutationCounts() == (prepare: 0, enable: 0, restore: 0))
     }
 
     @Test("preflight never invokes a control apply operation")
@@ -972,6 +1027,112 @@ private final class FakeCoordinator: @unchecked Sendable, LockdownCoordinating {
             storedRecoveryStateQueryCount += 1
         }
         return hasRecoveryStateValue
+    }
+}
+
+private actor RecoverySetupFakeCoordinator: LockdownCoordinating {
+    private var storedRecoveryState: RecoveryState
+    private var preparedMatches: Bool
+    private var prepareCalls = 0
+    private var enableCalls = 0
+    private var restoreCalls = 0
+    private var storedDiscardCount = 0
+
+    init(
+        recoveryState: RecoveryState = .none,
+        preparedMatches: Bool = true
+    ) {
+        storedRecoveryState = recoveryState
+        self.preparedMatches = preparedMatches
+    }
+
+    func enable(dryRun: Bool) async throws -> CoordinatorResult {
+        if dryRun {
+            return CoordinatorResult(
+                status: .make(controls: []),
+                dryRunPlan: DryRunPlan(changes: [])
+            )
+        }
+        enableCalls += 1
+        storedRecoveryState = .active
+        return CoordinatorResult(status: normalStatus, dryRunPlan: nil)
+    }
+
+    func restore() async throws -> RestoreResult {
+        restoreCalls += 1
+        return RestoreResult(expectedIDs: [], statuses: [])
+    }
+
+    func status() async -> LockdownStatus {
+        normalStatus
+    }
+
+    func hasRecoveryState() async -> Bool {
+        storedRecoveryState != .none
+    }
+
+    func recoveryState() async -> RecoveryState {
+        storedRecoveryState
+    }
+
+    func reviewRecoverySetup() async throws -> RecoverySetupReview {
+        RecoverySetupReview(
+            token: String(repeating: "a", count: 64),
+            capturedAt: Date(timeIntervalSince1970: 1),
+            items: ControlID.allCases.map {
+                RecoverySetupReviewItem(control: $0, summary: "Reviewed \($0.rawValue)")
+            }
+        )
+    }
+
+    func prepareRecovery(
+        profile: RecoverySetupProfile,
+        reviewToken: String
+    ) async throws -> RecoverySetupResult {
+        guard reviewToken == String(repeating: "a", count: 64) else {
+            throw RecoverySetupError.reviewTokenMismatch
+        }
+        _ = try profile.validated()
+        prepareCalls += 1
+        storedRecoveryState = .prepared
+        preparedMatches = true
+        return RecoverySetupResult(
+            capturedAt: Date(timeIntervalSince1970: 1),
+            controlCount: ControlID.allCases.count
+        )
+    }
+
+    func preparedRecoveryMatchesCurrent() async -> Bool? {
+        storedRecoveryState == .prepared ? preparedMatches : nil
+    }
+
+    func discardPreparedRecovery() async throws {
+        guard storedRecoveryState == .prepared else {
+            throw RecoverySetupError.recoveryStateNotActive
+        }
+        storedDiscardCount += 1
+        storedRecoveryState = .none
+    }
+
+    func completeManualRecovery(
+        token: String,
+        instructions: [ManualRecoveryInstruction]
+    ) async throws -> RestoreResult {
+        throw RecoverySetupError.manualRecoveryNotConfirmable
+    }
+
+    func mutationCounts() -> (prepare: Int, enable: Int, restore: Int) {
+        (prepareCalls, enableCalls, restoreCalls)
+    }
+
+    func discardCount() -> Int {
+        storedDiscardCount
+    }
+
+    private var normalStatus: LockdownStatus {
+        .make(controls: ControlID.allCases.map {
+            ControlStatus(id: $0, verification: .nonCompliant, detail: "normal")
+        })
     }
 }
 

@@ -6,7 +6,8 @@ Travel Lockdown is a local, source-built macOS utility. It has no network client
 
 - No setting changes during build, status, preflight, or dry-run.
 - Live enable requires an inline plan review and a separate impact confirmation.
-- Recovery state is captured before an apply attempt and retained until every registered control restores and verifies.
+- Live activation requires a separately reviewed prepared recovery snapshot. The coordinator refuses ordinary setup unless every registered control reports a complete, clearly unlocked posture, double-captures the automatic values, binds them to a review token, and rechecks them after persistence.
+- A prepared snapshot must exactly match current automatic settings before it is promoted to active recovery state. Promotion is persisted before the first apply attempt, and active recovery state is retained until every registered control restores and verifies.
 - The baseline is owner-only and contains declared non-credential state only. It never contains Wi-Fi passwords, Apple Account tokens, biometric data, recovery keys, or private keys.
 - Wi-Fi restoration can require ordered SSID bytes/names and public profile flags. This privacy-sensitive network metadata is stored in the owner-only `baseline.json` (mode `0600`) beneath an owner-only directory and is redacted from normal UI and CLI output.
 - Privileged execution accepts only a fixed enum of firewall and wake commands. It does not accept shell text, executable paths, or caller-provided arguments.
@@ -15,7 +16,7 @@ Travel Lockdown is a local, source-built macOS utility. It has no network client
 
 ## Recovery boundary
 
-Personal Hotspot auto-join, AirPlay Receiver, and Sharing services do not have a complete supported automation/readback boundary. They are stored as unresolved manual markers. The app keeps recovery visible and retains the baseline until the user completes and verifies those steps.
+Personal Hotspot auto-join, AirPlay Receiver, and Sharing services do not have a complete supported automation/readback boundary. New snapshots store the user's reviewed desired values, emit exact manual recovery instructions, and require a baseline-bound user attestation after automatic values re-verify. Legacy snapshots retain unresolved markers. They can be replaced only after every automatic value matches the active legacy baseline; replacement overlays newly reviewed manual values atomically, and any failure leaves the original active baseline unchanged.
 
 ## Compatibility boundary
 

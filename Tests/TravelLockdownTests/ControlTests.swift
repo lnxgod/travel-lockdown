@@ -596,7 +596,7 @@ struct ControlTests {
         ])
     }
 
-    @Test("manual Sharing services remain unresolved after firewall restoration")
+    @Test("manual Sharing stays unresolved while automatic firewall evidence is preserved")
     func ingressManualSharingMarkersPreventRestoredMatch() async throws {
         let runner = FakeRunner(results: [
             .firewallGlobalRead: .success("Firewall is disabled."),
@@ -620,7 +620,7 @@ struct ControlTests {
 
         let restoration = try await control.verifyRestored(from: snapshot)
 
-        #expect(restoration.matchesSnapshot == false)
+        #expect(restoration.matchesSnapshot)
         for service in SharingService.allCases {
             #expect(restoration.detail.contains(service.rawValue))
         }
@@ -832,7 +832,7 @@ struct ControlTests {
 
         #expect(snapshot == expected)
         #expect(client.restoredBaselines == [baseline])
-        #expect(restoration.matchesSnapshot == false)
+        #expect(restoration.matchesSnapshot)
         #expect(restoration.detail.contains("Personal Hotspot"))
         #expect(
             client.events == [
@@ -1159,7 +1159,7 @@ struct ControlTests {
         #expect(try await control.capture() == expected)
     }
 
-    @Test("unresolved AirPlay recovery prevents a restored match")
+    @Test("unresolved AirPlay preserves automatic Continuity evidence")
     func restoredVerificationRecognizesAbsentDomains() async throws {
         let runner = FakeRunner(results: [
             .handoffRead: .missingDomain("com.apple.coreservices.useractivityd"),
@@ -1181,7 +1181,7 @@ struct ControlTests {
 
         let restoration = try await control.verifyRestored(from: snapshot)
 
-        #expect(restoration.matchesSnapshot == false)
+        #expect(restoration.matchesSnapshot)
         #expect(restoration.detail.contains("AirPlay Receiver"))
     }
 
@@ -1314,7 +1314,7 @@ struct ControlTests {
                 .airDropRead
             ]
         )
-        #expect(restoration.matchesSnapshot == false)
+        #expect(restoration.matchesSnapshot)
         #expect(restoration.id == .continuity)
         #expect(opener.openCount == 1)
     }

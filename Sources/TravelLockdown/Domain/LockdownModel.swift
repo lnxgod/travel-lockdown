@@ -33,8 +33,24 @@ struct ControlStatus: Codable, Equatable, Sendable {
 }
 
 struct ManualRecoveryInstruction: Codable, Equatable, Sendable {
+    enum Confirmation: String, Codable, Equatable, Sendable {
+        case unavailable
+        case userAttestation
+    }
+
     let pane: String
     let action: String
+    let confirmation: Confirmation
+
+    init(
+        pane: String,
+        action: String,
+        confirmation: Confirmation = .unavailable
+    ) {
+        self.pane = pane
+        self.action = action
+        self.confirmation = confirmation
+    }
 }
 
 struct LockdownStatus: Equatable, Sendable {
