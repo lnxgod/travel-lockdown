@@ -21,11 +21,43 @@ func menuBarPresentationTracksLockdownState() {
     let attention = MenuBarPresentation.make(state: .attention, hasOperationAttention: false)
     #expect(attention.systemImage == "exclamationmark.shield.fill")
 
+    let unmanaged = MenuBarPresentation.make(state: .unmanaged, hasOperationAttention: false)
+    #expect(unmanaged == attention)
+
     let operationFailure = MenuBarPresentation.make(
         state: .off,
         hasOperationAttention: true
     )
     #expect(operationFailure == attention)
+}
+
+@Test("only a complete noncompliant control set is clearly unlocked")
+func clearlyUnlockedRequiresEveryControlExactlyOnce() {
+    let unlocked = LockdownStatus.make(controls: ControlID.allCases.map {
+        ControlStatus(id: $0, verification: .nonCompliant, detail: "normal")
+    })
+    let incomplete = LockdownStatus.make(controls: [
+        ControlStatus(id: .bluetooth, verification: .nonCompliant, detail: "normal")
+    ])
+    let unknown = LockdownStatus.make(controls: ControlID.allCases.map {
+        ControlStatus(
+            id: $0,
+            verification: $0 == .wifiPolicy ? .unavailable : .nonCompliant,
+            detail: "checked"
+        )
+    })
+    let duplicate = LockdownStatus.make(
+        controls: ControlID.allCases.map {
+            ControlStatus(id: $0, verification: .nonCompliant, detail: "normal")
+        } + [
+            ControlStatus(id: .bluetooth, verification: .nonCompliant, detail: "duplicate")
+        ]
+    )
+
+    #expect(unlocked.isClearlyUnlocked)
+    #expect(incomplete.isClearlyUnlocked == false)
+    #expect(unknown.isClearlyUnlocked == false)
+    #expect(duplicate.isClearlyUnlocked == false)
 }
 
 @Test("a single unavailable required control prevents an active lockdown state")

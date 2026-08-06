@@ -48,6 +48,7 @@ enum LockdownModeState: Equatable, Sendable {
     case off
     case verified
     case attention
+    case unmanaged
 }
 
 struct DryRunPlanReview: Equatable, Identifiable, Sendable {
@@ -124,10 +125,13 @@ final class LockdownViewModel: ObservableObject {
     }
 
     var lockdownModeState: LockdownModeState {
-        guard isRestoreAvailable else {
+        if isRestoreAvailable {
+            return status?.isActive == true ? .verified : .attention
+        }
+        guard let status else {
             return .off
         }
-        return status?.isActive == true ? .verified : .attention
+        return status.isClearlyUnlocked ? .off : .unmanaged
     }
 
     var isLockdownModeInteractionDisabled: Bool {
@@ -137,6 +141,10 @@ final class LockdownViewModel: ObservableObject {
             || pendingConfirmation != nil
             || pendingRestoreConfirmation != nil
             || isStatusRefreshInProgress
+    }
+
+    var isLockdownModeToggleDisabled: Bool {
+        isLockdownModeInteractionDisabled || lockdownModeState == .unmanaged
     }
 
     @discardableResult
@@ -201,6 +209,9 @@ final class LockdownViewModel: ObservableObject {
     func requestLockdownModeToggle() -> Task<Void, Never>? {
         if isRestoreAvailable {
             requestRestore()
+            return nil
+        }
+        guard lockdownModeState == .off else {
             return nil
         }
         return requestEnable()

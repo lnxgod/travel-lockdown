@@ -1,5 +1,10 @@
 import SwiftUI
 
+enum MenuPanelLayout {
+    static let width: CGFloat = 360
+    static let dashboardViewportHeight: CGFloat = 380
+}
+
 struct MenuView: View {
     @ObservedObject var model: LockdownViewModel
 
@@ -8,23 +13,27 @@ struct MenuView: View {
             header
             Divider()
 
+            lockdownControl
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    lockdownControl
                     workflowPanel
                         .disabled(model.isStatusRefreshInProgress)
                     recoveryAttention
                     statusResults
                     preflightResults
                 }
-                .padding(14)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
             }
-            .frame(maxHeight: 520)
+            .frame(height: MenuPanelLayout.dashboardViewportHeight)
 
             Divider()
             footer
         }
-        .frame(width: 360)
+        .frame(width: MenuPanelLayout.width)
         .onAppear {
             Task { await model.refreshStatusIfIdle() }
         }
@@ -79,14 +88,11 @@ struct MenuView: View {
                 LockdownSwitch(state: model.lockdownModeState)
             }
                 .buttonStyle(.plain)
-                .disabled(model.isLockdownModeInteractionDisabled)
+                .disabled(model.isLockdownModeToggleDisabled)
                 .accessibilityLabel("Lockdown Mode")
                 .accessibilityValue(lockdownAccessibilityValue)
-                .accessibilityHint(
-                    model.lockdownModeState == .off
-                        ? "Prepares a plan before confirmed activation"
-                        : "Starts confirmed recovery"
-                )
+                .accessibilityHint(lockdownAccessibilityHint)
+                .accessibilityIdentifier("lockdown-mode-toggle")
         }
         .padding(12)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
@@ -218,8 +224,8 @@ struct MenuView: View {
 
     @ViewBuilder
     private var statusResults: some View {
-        if let status = model.status {
-            GroupBox("Status") {
+        GroupBox("Status") {
+            if let status = model.status {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(status.controls.enumerated()), id: \.offset) { _, control in
                         Label(
@@ -231,12 +237,36 @@ struct MenuView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Label("Waiting for the read-only status check", systemImage: "clock")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
+        .accessibilityIdentifier("status-results")
     }
 
     @ViewBuilder
     private var recoveryAttention: some View {
+        if model.lockdownModeState == .unmanaged {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Recovery snapshot missing", systemImage: "exclamationmark.shield.fill")
+                    .font(.subheadline.weight(.semibold))
+                Text(
+                    "Lockdown-like or unverifiable settings were detected, but no recovery "
+                        + "baseline exists. Automatic restore cannot safely reconstruct the "
+                        + "previous settings. Restore baseline.json from Time Machine for exact "
+                        + "recovery, or review the Status results manually."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+            .accessibilityIdentifier("missing-recovery-baseline")
+        }
         if let attention = model.operationAttention {
             Label(attention.message, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
@@ -274,8 +304,8 @@ struct MenuView: View {
 
     @ViewBuilder
     private var preflightResults: some View {
-        if let report = model.preflightReport {
-            GroupBox("Preflight") {
+        GroupBox("Preflight") {
+            if let report = model.preflightReport {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(report.items.enumerated()), id: \.offset) { _, item in
                         Label(
@@ -291,8 +321,13 @@ struct MenuView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Label("Use Preflight below for travel-readiness checks", systemImage: "checklist")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
+        .accessibilityIdentifier("preflight-results")
     }
 
     private var footer: some View {
@@ -303,12 +338,14 @@ struct MenuView: View {
                 Label("Status", systemImage: "checkmark.shield")
             }
             .disabled(model.isLockdownModeInteractionDisabled)
+            .accessibilityIdentifier("refresh-status")
 
             Button {
                 Task { await model.runPreflight() }
             } label: {
                 Label("Preflight", systemImage: "checklist")
             }
+            .accessibilityIdentifier("run-preflight")
 
             Spacer()
             Button {
@@ -328,7 +365,7 @@ struct MenuView: View {
         switch model.lockdownModeState {
         case .verified:
             return .active
-        case .attention:
+        case .attention, .unmanaged:
             return .attention
         case .off:
             break
@@ -362,6 +399,8 @@ struct MenuView: View {
                 return "LOCKED"
             case .attention:
                 return "ATTENTION"
+            case .unmanaged:
+                return "UNMANAGED"
             case .off:
                 return "READY"
             }
@@ -400,6 +439,8 @@ struct MenuView: View {
                 return "Lockdown verified. Toggle off to restore."
             case .attention:
                 return "Recovery state exists; review the attention items below."
+            case .unmanaged:
+                return "Current posture is unknown and no recovery snapshot is available."
             case .off:
                 return "Turn on to stop auto-join while keeping Wi-Fi available."
             }
@@ -449,6 +490,19 @@ struct MenuView: View {
             "On and verified"
         case .attention:
             "Indeterminate; recovery attention required"
+        case .unmanaged:
+            "Unmanaged; recovery snapshot missing"
+        }
+    }
+
+    private var lockdownAccessibilityHint: String {
+        switch model.lockdownModeState {
+        case .off:
+            "Prepares a plan before confirmed activation"
+        case .verified, .attention:
+            "Starts confirmed recovery"
+        case .unmanaged:
+            "Automatic changes are unavailable without a recovery snapshot"
         }
     }
 }
@@ -467,7 +521,7 @@ private struct LockdownSwitch: View {
                 .shadow(color: .black.opacity(0.24), radius: 1, y: 1)
                 .padding(3)
                 .offset(x: thumbOffset)
-            if state == .attention {
+            if state == .attention || state == .unmanaged {
                 Image(systemName: "exclamationmark")
                     .font(.system(size: 8, weight: .black))
                     .foregroundStyle(.orange)
@@ -483,7 +537,7 @@ private struct LockdownSwitch: View {
             .secondary
         case .verified:
             .green
-        case .attention:
+        case .attention, .unmanaged:
             .orange
         }
     }
@@ -494,7 +548,7 @@ private struct LockdownSwitch: View {
             -9
         case .verified:
             9
-        case .attention:
+        case .attention, .unmanaged:
             0
         }
     }

@@ -44,6 +44,9 @@ struct PackagingTests {
         #expect(menuText.contains("Label(\"Status\", systemImage: \"checkmark.shield\")"))
         #expect(menuText.contains("Label(\"Preflight\", systemImage: \"checklist\")"))
         #expect(menuText.contains("GameChangersBrandLogo"))
+        #expect(menuText.contains(".frame(height: MenuPanelLayout.dashboardViewportHeight)"))
+        #expect(menuText.contains(".frame(maxHeight: 520)") == false)
+        #expect(menuText.contains("Recovery snapshot missing"))
         #expect(menuText.contains(".alert(item:") == false)
 
         let appSource = try String(

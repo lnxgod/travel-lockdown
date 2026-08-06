@@ -1,9 +1,103 @@
+import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import TravelLockdown
 
 @Suite("ViewModelTests")
 struct ViewModelTests {
+    @Test("menu dashboard has a non-collapsing viewport without invoking mutations")
+    @MainActor
+    func menuDashboardCannotCollapse() {
+        let coordinator = FakeCoordinator()
+        let model = LockdownViewModel(
+            coordinator: coordinator,
+            preflightProvider: FakePreflightProvider()
+        )
+        let hostingView = NSHostingView(rootView: MenuView(model: model))
+
+        hostingView.layoutSubtreeIfNeeded()
+
+        #expect(MenuPanelLayout.dashboardViewportHeight >= 360)
+        #expect(hostingView.fittingSize.width >= MenuPanelLayout.width)
+        #expect(hostingView.fittingSize.height >= 500)
+        #expect(coordinator.enableCount == 0)
+        #expect(coordinator.restoreCount == 0)
+    }
+
+    @Test("missing recovery state blocks ambiguous toggle actions")
+    @MainActor
+    func unmanagedPostureCannotBecomeANewBaseline() async {
+        let mixedStatus = LockdownStatus.make(controls: ControlID.allCases.map {
+            ControlStatus(
+                id: $0,
+                verification: $0 == .bluetooth ? .compliant : .nonCompliant,
+                detail: "checked"
+            )
+        })
+        let coordinator = FakeCoordinator(status: mixedStatus, hasRecoveryState: false)
+        let model = LockdownViewModel(
+            coordinator: coordinator,
+            preflightProvider: FakePreflightProvider()
+        )
+
+        let startup = model.beginStartupHydration()
+        await startup?.value
+
+        #expect(model.lockdownModeState == .unmanaged)
+        #expect(model.isStartupHydrated)
+        #expect(model.isLockdownModeToggleDisabled)
+        #expect(model.requestLockdownModeToggle() == nil)
+        #expect(model.pendingPlanReview == nil)
+        #expect(coordinator.enableCount == 0)
+        #expect(coordinator.restoreCount == 0)
+    }
+
+    @Test("fully compliant controls without recovery state remain unmanaged")
+    @MainActor
+    func lockedPostureWithoutBaselineCannotOverwriteRecoveryState() async {
+        let lockedStatus = LockdownStatus.make(controls: ControlID.allCases.map {
+            ControlStatus(id: $0, verification: .compliant, detail: "locked")
+        })
+        let coordinator = FakeCoordinator(status: lockedStatus, hasRecoveryState: false)
+        let model = LockdownViewModel(
+            coordinator: coordinator,
+            preflightProvider: FakePreflightProvider()
+        )
+
+        let startup = model.beginStartupHydration()
+        await startup?.value
+
+        #expect(model.lockdownModeState == .unmanaged)
+        #expect(model.isStartupHydrated)
+        #expect(model.isLockdownModeToggleDisabled)
+        #expect(model.requestLockdownModeToggle() == nil)
+        #expect(coordinator.enableCount == 0)
+        #expect(coordinator.restoreCount == 0)
+    }
+
+    @Test("a complete normal posture remains eligible for a read-only enable plan")
+    @MainActor
+    func clearlyUnlockedPostureCanPrepareEnablePlan() async {
+        let normalStatus = LockdownStatus.make(controls: ControlID.allCases.map {
+            ControlStatus(id: $0, verification: .nonCompliant, detail: "normal")
+        })
+        let coordinator = FakeCoordinator(status: normalStatus, hasRecoveryState: false)
+        let model = LockdownViewModel(
+            coordinator: coordinator,
+            preflightProvider: FakePreflightProvider()
+        )
+
+        await model.refreshStatus()
+        let task = model.requestLockdownModeToggle()
+        await task?.value
+
+        #expect(model.lockdownModeState == .off)
+        #expect(model.pendingPlanReview != nil)
+        #expect(coordinator.enableDryRuns == [true])
+        #expect(coordinator.restoreCount == 0)
+    }
+
     @Test("preflight never invokes a control apply operation")
     func preflightIsReadOnly() async throws {
         let coordinator = FakeCoordinator()

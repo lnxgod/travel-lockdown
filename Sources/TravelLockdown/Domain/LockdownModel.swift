@@ -50,4 +50,12 @@ struct LockdownStatus: Equatable, Sendable {
             return matchingControls.count == 1 && matchingControls[0].verification == .compliant
         }
     }
+
+    var isClearlyUnlocked: Bool {
+        ControlID.allCases.allSatisfy { control in
+            let matchingControls = controls.filter { $0.id == control }
+            return matchingControls.count == 1
+                && matchingControls[0].verification == .nonCompliant
+        }
+    }
 }

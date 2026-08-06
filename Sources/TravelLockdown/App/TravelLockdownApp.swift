@@ -66,7 +66,7 @@ struct MenuBarPresentation: Equatable, Sendable {
         state: LockdownModeState,
         hasOperationAttention: Bool
     ) -> MenuBarPresentation {
-        if hasOperationAttention || state == .attention {
+        if hasOperationAttention || state == .attention || state == .unmanaged {
             return MenuBarPresentation(
                 title: "Travel Lockdown",
                 systemImage: "exclamationmark.shield.fill",
