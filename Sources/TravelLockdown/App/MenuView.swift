@@ -619,7 +619,7 @@ struct MenuView: View {
             case .verified:
                 return "Lockdown verified. Toggle off to restore."
             case .attention:
-                return "Recovery state exists; review the attention items below."
+                return "Lockdown is on with recovery attention. Review status below or toggle off to restore."
             case .unmanaged:
                 return model.recoveryState == .prepared
                     ? "The prepared snapshot needs a fresh review before Lockdown can turn on."
@@ -667,19 +667,29 @@ struct MenuView: View {
         }
     }
 
-    private var lockdownAccessibilityValue: String {
-        switch model.lockdownModeState {
+    static func lockdownAccessibilityValue(
+        for state: LockdownModeState,
+        recoveryState: RecoveryState
+    ) -> String {
+        switch state {
         case .off:
             "Off"
         case .verified:
             "On and verified"
         case .attention:
-            "Indeterminate; recovery attention required"
+            "On; recovery attention required"
         case .unmanaged:
-            model.recoveryState == .prepared
+            recoveryState == .prepared
                 ? "Prepared snapshot changed or could not be verified"
                 : "Unmanaged; recovery snapshot missing"
         }
+    }
+
+    private var lockdownAccessibilityValue: String {
+        Self.lockdownAccessibilityValue(
+            for: model.lockdownModeState,
+            recoveryState: model.recoveryState
+        )
     }
 
     private var lockdownAccessibilityHint: String {
@@ -687,7 +697,7 @@ struct MenuView: View {
         case .off:
             "Prepares a plan before confirmed activation"
         case .verified, .attention:
-            "Starts confirmed recovery"
+            "Turns Lockdown off and starts confirmed recovery"
         case .unmanaged:
             model.recoveryState == .prepared
                 ? "Rebuild the recovery snapshot before activation"
@@ -714,6 +724,7 @@ private struct LockdownSwitch: View {
                 Image(systemName: "exclamationmark")
                     .font(.system(size: 8, weight: .black))
                     .foregroundStyle(.orange)
+                    .offset(x: state == .attention ? -9 : 0)
             }
         }
         .frame(width: 42, height: 24)
@@ -732,13 +743,12 @@ private struct LockdownSwitch: View {
     }
 
     private var thumbOffset: CGFloat {
-        switch state {
-        case .off:
-            -9
-        case .verified:
+        if state.isSwitchOn {
             9
-        case .attention, .unmanaged:
+        } else if state == .unmanaged {
             0
+        } else {
+            -9
         }
     }
 }

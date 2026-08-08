@@ -343,11 +343,11 @@ final class BaselineTransaction: @unchecked Sendable {
         try store.saveUnlocked(baseline)
     }
 
-    func removeAfterVerifiedRestore(
+    func prepareAfterVerifiedRestore(
         _ result: RestoreResult,
         matching baseline: LockdownBaseline
     ) throws -> Bool {
-        try store.removeAfterVerifiedRestoreUnlocked(result, matching: baseline)
+        try store.prepareAfterVerifiedRestoreUnlocked(result, matching: baseline)
     }
 
     func removePrepared(matching baseline: LockdownBaseline) throws -> Bool {
@@ -396,13 +396,13 @@ struct BaselineStore: Sendable {
         try transaction.save(baseline)
     }
 
-    func removeAfterVerifiedRestore(
+    func prepareAfterVerifiedRestore(
         _ result: RestoreResult,
         matching baseline: LockdownBaseline
     ) throws -> Bool {
         let transaction = try beginExclusiveTransaction()
         defer { transaction.release() }
-        return try transaction.removeAfterVerifiedRestore(result, matching: baseline)
+        return try transaction.prepareAfterVerifiedRestore(result, matching: baseline)
     }
 
     func removePrepared(matching baseline: LockdownBaseline) throws -> Bool {
@@ -502,20 +502,27 @@ struct BaselineStore: Sendable {
         }
     }
 
-    fileprivate func removeAfterVerifiedRestoreUnlocked(
+    fileprivate func prepareAfterVerifiedRestoreUnlocked(
         _ result: RestoreResult,
         matching baseline: LockdownBaseline
     ) throws -> Bool {
         let baselineIDs = baseline.snapshots.map(\.id)
-        guard result.isFullyRestored,
+        guard baseline.recoveryState == .active,
+              result.isFullyRestored,
               Set(baselineIDs).count == baselineIDs.count,
               Set(baselineIDs) == result.expectedIDs,
               try loadUnlocked() == baseline else {
             return false
         }
 
-        try FileManager.default.removeItem(at: baselineURL)
-        return true
+        let prepared = LockdownBaseline(
+            version: baseline.version,
+            capturedAt: baseline.capturedAt,
+            snapshots: baseline.snapshots,
+            recoveryState: .prepared
+        )
+        try saveUnlocked(prepared)
+        return try loadUnlocked() == prepared
     }
 
     private var baselineURL: URL {

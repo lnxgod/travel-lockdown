@@ -165,6 +165,7 @@ struct RecoverySetupTests {
             reviewToken: review.token
         )
         _ = try await fixture.coordinator.enable(dryRun: false)
+        let active = try fixture.store.load()
 
         let restore = try await fixture.coordinator.restore()
         let instructions = restore.statuses.compactMap(\.manualRecovery)
@@ -185,7 +186,12 @@ struct RecoverySetupTests {
             instructions: instructions
         )
         #expect(completed.isFullyRestored)
-        #expect(fixture.store.exists == false)
+        let prepared = try fixture.store.load()
+        #expect(fixture.store.exists)
+        #expect(prepared.recoveryState == .prepared)
+        #expect(prepared.version == active.version)
+        #expect(prepared.capturedAt == active.capturedAt)
+        #expect(prepared.snapshots == active.snapshots)
     }
 
     @Test("changing settings during a review cannot produce a torn snapshot")

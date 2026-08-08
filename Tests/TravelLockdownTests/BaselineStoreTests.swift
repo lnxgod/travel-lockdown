@@ -447,7 +447,7 @@ struct BaselineStoreTests {
         #expect(store.exists == false)
     }
 
-    @Test("a partial restore never deletes the baseline")
+    @Test("a partial restore never prepares the active baseline")
     func partialRestoreRetainsBaseline() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -459,11 +459,12 @@ struct BaselineStoreTests {
             RestorationStatus(id: .continuity, matchesSnapshot: false, detail: "not restored")
         ])
 
-        #expect(try store.removeAfterVerifiedRestore(partial, matching: baseline) == false)
+        #expect(try store.prepareAfterVerifiedRestore(partial, matching: baseline) == false)
         #expect(store.exists == true)
+        #expect(try store.load() == baseline)
     }
 
-    @Test("a complete result for another control set cannot delete the loaded baseline")
+    @Test("a complete result for another control set cannot prepare the loaded baseline")
     func mismatchedRestoreResultRetainsBaseline() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -485,12 +486,13 @@ struct BaselineStoreTests {
             ]
         )
 
-        #expect(try store.removeAfterVerifiedRestore(forged, matching: baseline) == false)
+        #expect(try store.prepareAfterVerifiedRestore(forged, matching: baseline) == false)
         #expect(store.exists == true)
+        #expect(try store.load() == baseline)
     }
 
-    @Test("only a complete verified restore deletes the baseline")
-    func verifiedRestoreDeletesBaseline() throws {
+    @Test("only a complete verified restore atomically prepares the same baseline")
+    func verifiedRestorePreparesReusableBaseline() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = BaselineStore(directory: directory)
@@ -508,8 +510,15 @@ struct BaselineStoreTests {
             RestorationStatus(id: .bluetooth, matchesSnapshot: true, detail: "restored")
         ])
 
-        #expect(try store.removeAfterVerifiedRestore(complete, matching: baseline) == true)
-        #expect(store.exists == false)
+        #expect(try store.prepareAfterVerifiedRestore(complete, matching: baseline) == true)
+        let prepared = try store.load()
+        #expect(store.exists)
+        #expect(prepared.recoveryState == .prepared)
+        #expect(prepared.version == baseline.version)
+        #expect(prepared.capturedAt == baseline.capturedAt)
+        #expect(prepared.snapshots == baseline.snapshots)
+        #expect(try store.prepareAfterVerifiedRestore(complete, matching: prepared) == false)
+        #expect(try store.load() == prepared)
     }
 
     private func temporaryDirectory() throws -> URL {

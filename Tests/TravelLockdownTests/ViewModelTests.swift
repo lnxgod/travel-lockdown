@@ -494,6 +494,34 @@ struct ViewModelTests {
         #expect(model.pendingRestoreConfirmation == nil)
     }
 
+    @Test("verified recovery returns the same switch to reusable off state")
+    @MainActor
+    func verifiedRecoveryPreparesReusableSwitch() async {
+        let coordinator = RecoverySetupFakeCoordinator(
+            recoveryState: .active,
+            restoreCompletes: true
+        )
+        let model = LockdownViewModel(
+            coordinator: coordinator,
+            preflightProvider: FakePreflightProvider()
+        )
+        await model.beginStartupHydration()?.value
+
+        #expect(model.lockdownModeState == .attention)
+        #expect(model.lockdownModeState.isSwitchOn)
+
+        model.requestLockdownModeToggle()
+        let restore = model.confirmRestore()
+        await restore?.value
+
+        #expect(model.recoveryState == .prepared)
+        #expect(model.preparedRecoveryMatchesCurrent == true)
+        #expect(model.lockdownModeState == .off)
+        #expect(model.lockdownModeState.isSwitchOn == false)
+        #expect(model.isLockdownModeToggleDisabled == false)
+        #expect(await coordinator.mutationCounts() == (prepare: 0, enable: 0, restore: 1))
+    }
+
     @Test("mode state distinguishes verified lockdown from recovery attention")
     @MainActor
     func modeStateRequiresCompleteVerification() async {
@@ -517,6 +545,14 @@ struct ViewModelTests {
 
         #expect(verifiedModel.lockdownModeState == .verified)
         #expect(attentionModel.lockdownModeState == .attention)
+        #expect(verifiedModel.lockdownModeState.isSwitchOn)
+        #expect(attentionModel.lockdownModeState.isSwitchOn)
+        #expect(
+            MenuView.lockdownAccessibilityValue(
+                for: attentionModel.lockdownModeState,
+                recoveryState: .active
+            ) == "On; recovery attention required"
+        )
     }
 
     @Test("cancelling inline recovery confirmation leaves recovery untouched")
@@ -1033,6 +1069,7 @@ private final class FakeCoordinator: @unchecked Sendable, LockdownCoordinating {
 private actor RecoverySetupFakeCoordinator: LockdownCoordinating {
     private var storedRecoveryState: RecoveryState
     private var preparedMatches: Bool
+    private let restoreCompletes: Bool
     private var prepareCalls = 0
     private var enableCalls = 0
     private var restoreCalls = 0
@@ -1040,10 +1077,12 @@ private actor RecoverySetupFakeCoordinator: LockdownCoordinating {
 
     init(
         recoveryState: RecoveryState = .none,
-        preparedMatches: Bool = true
+        preparedMatches: Bool = true,
+        restoreCompletes: Bool = false
     ) {
         storedRecoveryState = recoveryState
         self.preparedMatches = preparedMatches
+        self.restoreCompletes = restoreCompletes
     }
 
     func enable(dryRun: Bool) async throws -> CoordinatorResult {
@@ -1060,6 +1099,20 @@ private actor RecoverySetupFakeCoordinator: LockdownCoordinating {
 
     func restore() async throws -> RestoreResult {
         restoreCalls += 1
+        if restoreCompletes {
+            storedRecoveryState = .prepared
+            preparedMatches = true
+            return RestoreResult(
+                expectedIDs: Set(ControlID.allCases),
+                statuses: ControlID.allCases.map {
+                    RestorationStatus(
+                        id: $0,
+                        matchesSnapshot: true,
+                        detail: "restored"
+                    )
+                }
+            )
+        }
         return RestoreResult(expectedIDs: [], statuses: [])
     }
 

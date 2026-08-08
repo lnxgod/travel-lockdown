@@ -1319,6 +1319,46 @@ struct ControlTests {
         #expect(opener.openCount == 1)
     }
 
+    @Test("restore treats an already absent Continuity preference as restored")
+    func restoreAlreadyMissingPreferenceIsIdempotent() async throws {
+        let runner = FakeRunner(results: [
+            .deleteAdvertising: CommandResult(
+                exitCode: 1,
+                stdout: "",
+                stderr: "Domain/default pair does not exist"
+            ),
+            .handoffRead: .success("{ ActivityReceivingAllowed = 0; }"),
+            .enableReceiving: .success(""),
+            .restoreAirDropContactsOnly: .success("")
+        ])
+        let opener = FakeSettingsOpener()
+        let control = ContinuityControl(
+            runner: runner,
+            airPlayVerifier: .unavailable,
+            settingsOpener: opener
+        )
+        let snapshot = try ControlSnapshot.capturing(
+            ContinuitySnapshot(
+                activityAdvertisingAllowed: .missing,
+                activityReceivingAllowed: .bool(true),
+                discoverableMode: .string("ContactsOnly")
+            ),
+            for: .continuity
+        )
+
+        try await control.restore(from: snapshot)
+
+        #expect(
+            runner.commands == [
+                .deleteAdvertising,
+                .handoffRead,
+                .enableReceiving,
+                .restoreAirDropContactsOnly
+            ]
+        )
+        #expect(opener.openCount == 1)
+    }
+
     @Test("legacy Continuity snapshot decodes to an unresolved AirPlay marker")
     func continuityLegacySnapshotAddsAirPlayMarker() throws {
         let legacy = Data(

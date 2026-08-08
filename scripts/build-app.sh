@@ -10,6 +10,7 @@ project_dir=${PWD:A}
 binary_path=".build/release/TravelLockdown"
 plist_path="App/Info.plist"
 logo_path="Assets/gamechangers-ai.png"
+icon_path="Assets/AppIcon.icns"
 release_dir=${TRAVEL_LOCKDOWN_RELEASE_DIR:-"$HOME/Library/Application Support/TravelLockdown/Release"}
 release_dir=${release_dir:a}
 if [[ -L "$release_dir" ]]; then
@@ -100,6 +101,7 @@ validate_version_target() {
 
 [[ -f "$plist_path" ]] || fail "Missing $plist_path"
 [[ -f "$logo_path" ]] || fail "Missing $logo_path"
+[[ -f "$icon_path" ]] || fail "Missing $icon_path"
 [[ "$release_dir" != "/" ]] || fail "Refusing to use / as the release directory" 73
 if [[ "$release_dir" == "$project_dir" || "$release_dir" == "$project_dir"/* ]]; then
   fail "Release directory must be outside the project tree" 73
@@ -198,10 +200,13 @@ mkdir -p "$staging_app/Contents/MacOS" "$staging_app/Contents/Resources"
 cp "$binary_path" "$staging_app/Contents/MacOS/TravelLockdown"
 cp "$plist_path" "$staging_app/Contents/Info.plist"
 cp "$logo_path" "$staging_app/Contents/Resources/gamechangers-ai.png"
+cp "$icon_path" "$staging_app/Contents/Resources/AppIcon.icns"
 [[ -x "$staging_app/Contents/MacOS/TravelLockdown" ]] || fail "Packaged executable is missing"
 [[ -f "$staging_app/Contents/Info.plist" ]] || fail "Packaged Info.plist is missing"
 [[ -f "$staging_app/Contents/Resources/gamechangers-ai.png" ]] \
   || fail "Packaged GameChangers logo is missing"
+[[ -f "$staging_app/Contents/Resources/AppIcon.icns" ]] \
+  || fail "Packaged app icon is missing"
 
 xattr -cr "$staging_app"
 codesign --force --sign - "$staging_app"

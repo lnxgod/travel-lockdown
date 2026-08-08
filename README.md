@@ -74,9 +74,9 @@ Click the GameChangers logo in the menu bar.
 
 The coordinator checks for a complete, clearly unlocked status before review, before save, and after save. It refuses to create a new recovery target from settings that already appear locked or ambiguous. A prepared snapshot must still exactly match the Mac before activation; it is promoted to active recovery state before the first lockdown mutation.
 
-The switch stays left when off, moves right and green only when every registered control verifies, and rests in the center with an orange warning when recovery state exists but verification is incomplete.
+The switch stays left when off and moves right whenever Lockdown has an active recovery state. It is green when every registered control verifies and orange when Lockdown is on but a protection or manual check still needs attention. The orange state remains recoverable from the same switch; it does not pretend incomplete verification is fully secure.
 
-To recover, turn the same switch off and confirm **Restore Normal State**. If recovery is partial, keep the app and its baseline installed and complete the listed System Settings steps. Dismissing a manual instruction never marks it restored.
+To recover, turn the same switch off and confirm **Restore Normal State**. If recovery is partial, keep the app and its baseline installed and complete the listed System Settings steps. Dismissing a manual instruction never marks it restored. After every automatic and manual item verifies, the exact active snapshot is atomically returned to prepared state instead of being deleted. The switch is then ready for another trip, provided the prepared snapshot still exactly matches the Mac before the next activation.
 
 Older snapshots that did not record the manual settings are retained until all automatic values restore. The app then offers **Review Missing Recovery Settings** and atomically replaces the old active snapshot with a reviewed prepared snapshot; any failed check leaves the old snapshot unchanged.
 
@@ -115,7 +115,7 @@ The accepted alternatives are `on|off`, `current-user|same-network|everyone`, `r
 
 ## Remove the app
 
-First turn Lockdown Mode off and finish every recovery item. Only after the app no longer offers recovery should you quit it and remove the checkout and `~/Library/Application Support/TravelLockdown/Release`. Do not delete `baseline.json` while recovery is incomplete.
+First turn Lockdown Mode off and finish every recovery item. Confirm the app shows **READY** with its recovery snapshot prepared, then quit it. At that point you may remove the checkout, `~/Library/Application Support/TravelLockdown/Release`, and the reusable prepared snapshot if you no longer want the app. Never delete `baseline.json` while Lockdown is active or recovery is incomplete.
 
 ## Development and security
 

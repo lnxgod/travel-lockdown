@@ -299,7 +299,19 @@ struct ContinuityControl: LockdownControl {
     ) throws {
         switch value {
         case .missing:
-            try execute(arguments: domainArguments + ["delete", domain, key])
+            let result = try runner.run(
+                executable: "/usr/bin/defaults",
+                arguments: domainArguments + ["delete", domain, key]
+            )
+            if result.exitCode != 0 {
+                let current = try read(
+                    domain: domain,
+                    currentHost: domainArguments == ["-currentHost"]
+                )
+                guard Self.preferenceValue(key, in: current) == nil else {
+                    throw ContinuityControlError.commandFailed
+                }
+            }
         case .bool(let bool):
             try execute(
                 arguments: domainArguments

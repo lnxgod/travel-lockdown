@@ -22,19 +22,24 @@ struct PackagingTests {
         #expect(info?["LSUIElement"] as? Bool == true)
         #expect(info?["CFBundleExecutable"] as? String == "TravelLockdown")
         #expect(info?["CFBundleIdentifier"] as? String == "ai.gamechangers.travel-lockdown")
-        #expect(info?["CFBundleShortVersionString"] as? String == "1.0.0")
+        #expect(info?["CFBundleIconFile"] as? String == "AppIcon.icns")
+        #expect(info?["CFBundleShortVersionString"] as? String == "1.0.1")
+        #expect(info?["CFBundleVersion"] as? String == "2")
         #expect(info?["LSMinimumSystemVersion"] as? String == "15.0")
     }
 
     @Test("public release keeps a native menu trigger and the full branded dashboard")
     func publicReleaseMetadataIsComplete() throws {
         let logo = packageRoot.appendingPathComponent("Assets/gamechangers-ai.png")
+        let icon = packageRoot.appendingPathComponent("Assets/AppIcon.icns")
         let license = packageRoot.appendingPathComponent("LICENSE")
         let menuSource = packageRoot
             .appendingPathComponent("Sources/TravelLockdown/App/MenuView.swift")
         let menuText = try String(contentsOf: menuSource, encoding: .utf8)
 
         #expect(FileManager.default.fileExists(atPath: logo.path))
+        #expect(FileManager.default.fileExists(atPath: icon.path))
+        #expect(try Data(contentsOf: icon).prefix(4) == Data("icns".utf8))
         #expect(FileManager.default.fileExists(atPath: license.path))
         #expect(menuText.contains("LockdownSwitch"))
         #expect(menuText.contains("Refreshing status"))
@@ -270,10 +275,10 @@ struct PackagingTests {
         #expect(coordinator.restoreCallCount == 1)
     }
 
-    @Test("restore application returns nonzero when recovery-state removal fails")
+    @Test("restore application returns nonzero when reusable snapshot preparation fails")
     @MainActor
-    func restoreApplicationFailsClosedOnBaselineRemovalFailure() async {
-        let coordinator = RestoreCoordinatorFake(error: .baselineRemovalFailed)
+    func restoreApplicationFailsClosedOnBaselinePreparationFailure() async {
+        let coordinator = RestoreCoordinatorFake(error: .baselinePreparationFailed)
 
         let exitCode = await RestoreApplication.run(
             coordinator: coordinator,
@@ -344,6 +349,15 @@ struct PackagingTests {
                 atPath: fixture.project
                     .appendingPathComponent("build/TravelLockdown.app/Contents/Info.plist")
                 .path
+            )
+        )
+        #expect(
+            FileManager.default.fileExists(
+                atPath: fixture.project
+                    .appendingPathComponent(
+                        "build/TravelLockdown.app/Contents/Resources/AppIcon.icns"
+                    )
+                    .path
             )
         )
         #expect(
@@ -784,6 +798,14 @@ private struct BuildScriptFixture {
         try manager.copyItem(
             at: sourceLogo,
             to: assets.appendingPathComponent("gamechangers-ai.png")
+        )
+        let sourceIcon = sourcePlist
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Assets/AppIcon.icns")
+        try manager.copyItem(
+            at: sourceIcon,
+            to: assets.appendingPathComponent("AppIcon.icns")
         )
 
         try Self.writeExecutable(

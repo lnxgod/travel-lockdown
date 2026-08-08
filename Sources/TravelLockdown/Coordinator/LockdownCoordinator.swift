@@ -20,7 +20,7 @@ struct CoordinatorResult: Equatable, Sendable {
 enum CoordinatorError: Error, Equatable {
     case transactionInProgress
     case baselineControlSetMismatch
-    case baselineRemovalFailed
+    case baselinePreparationFailed
 }
 
 protocol LockdownCoordinating: Sendable {
@@ -172,10 +172,14 @@ actor LockdownCoordinator: LockdownCoordinating {
             do {
                 try await control.restore(from: snapshot)
             } catch {
-                _ = try? await control.verifyRestored(from: snapshot)
-                statuses.append(
-                    failedRestorationStatus(for: control.id, operation: "restore")
-                )
+                if let verified = try? await control.verifyRestored(from: snapshot),
+                   verified.matchesSnapshot {
+                    statuses.append(verified)
+                } else {
+                    statuses.append(
+                        failedRestorationStatus(for: control.id, operation: "restore")
+                    )
+                }
                 continue
             }
 
@@ -194,8 +198,8 @@ actor LockdownCoordinator: LockdownCoordinating {
             recoveryToken: try RecoverySnapshotFingerprint.baseline(baseline)
         )
         if result.isFullyRestored {
-            guard try baselineTransaction.removeAfterVerifiedRestore(result, matching: baseline) else {
-                throw CoordinatorError.baselineRemovalFailed
+            guard try baselineTransaction.prepareAfterVerifiedRestore(result, matching: baseline) else {
+                throw CoordinatorError.baselinePreparationFailed
             }
         }
         return result
@@ -439,8 +443,8 @@ actor LockdownCoordinator: LockdownCoordinating {
         guard result.isFullyRestored else {
             return result
         }
-        guard try baselineTransaction.removeAfterVerifiedRestore(result, matching: baseline) else {
-            throw CoordinatorError.baselineRemovalFailed
+        guard try baselineTransaction.prepareAfterVerifiedRestore(result, matching: baseline) else {
+            throw CoordinatorError.baselinePreparationFailed
         }
         return result
     }

@@ -50,6 +50,10 @@ enum LockdownModeState: Equatable, Sendable {
     case verified
     case attention
     case unmanaged
+
+    var isSwitchOn: Bool {
+        self == .verified || self == .attention
+    }
 }
 
 struct DryRunPlanReview: Equatable, Identifiable, Sendable {

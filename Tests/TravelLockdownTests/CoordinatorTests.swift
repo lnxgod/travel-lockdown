@@ -375,7 +375,8 @@ struct CoordinatorTests {
         )
         #expect(result.expectedIDs == Set([ControlID.bluetooth, ControlID.continuity]))
         #expect(result.isFullyRestored == true)
-        #expect(fixture.store.exists == false)
+        #expect(fixture.store.exists)
+        #expect(try fixture.store.load().recoveryState == .prepared)
     }
 
     @Test("restore uses baseline comparison and retains a mismatched baseline")
@@ -403,7 +404,7 @@ struct CoordinatorTests {
         #expect(fixture.store.exists == true)
     }
 
-    @Test("unresolved AirPlay recovery marker prevents baseline deletion")
+    @Test("unresolved AirPlay recovery marker keeps the baseline active")
     func unresolvedAirPlayRetainsBaseline() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -442,10 +443,76 @@ struct CoordinatorTests {
         #expect(opener.openCount == 1)
     }
 
+    @Test("active mixed Continuity recovery can retry and complete")
+    func activeMixedContinuityRecoveryCanRetryAndComplete() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = BaselineStore(directory: directory, modelRegistry: .travelLockdown)
+        let snapshot = try ControlSnapshot.capturing(
+            ContinuitySnapshot(
+                activityAdvertisingAllowed: .missing,
+                activityReceivingAllowed: .bool(true),
+                discoverableMode: .string("ContactsOnly"),
+                airPlayReceiverBaseline: AirPlayReceiverBaseline(
+                    isEnabled: true,
+                    access: .currentUser,
+                    requiresPassword: true
+                )
+            ),
+            for: .continuity
+        )
+        try store.save(
+            LockdownBaseline(
+                version: 1,
+                capturedAt: Date(timeIntervalSince1970: 1),
+                snapshots: [snapshot],
+                recoveryState: .active
+            )
+        )
+        let runner = MixedContinuityRecoveryRunner()
+        let coordinator = LockdownCoordinator(
+            controls: [
+                ContinuityControl(
+                    runner: runner,
+                    airPlayVerifier: .unavailable,
+                    settingsOpener: FailingCoordinatorSettingsOpener()
+                )
+            ],
+            baselineStore: store
+        )
+
+        let result = try await coordinator.restore()
+
+        #expect(result.isFullyRestored == false)
+        #expect(result.statuses.first?.matchesSnapshot == true)
+        #expect(result.statuses.first?.manualRecovery?.confirmation == .userAttestation)
+        #expect(runner.didAttemptAlreadyMissingDelete)
+        #expect(runner.didRestoreRemainingPreferences)
+        #expect(store.exists)
+
+        let instruction = try #require(result.statuses.first?.manualRecovery)
+        let token = try #require(result.recoveryToken)
+        let completed = try await coordinator.completeManualRecovery(
+            token: token,
+            instructions: [instruction]
+        )
+
+        #expect(completed.isFullyRestored)
+        #expect(store.exists)
+        #expect(try store.load().recoveryState == .prepared)
+    }
+
     @Test("restore errors remain per-control mismatches and preserve the baseline")
     func restoreErrorPreservesBaseline() async throws {
         let fixture = try coordinatorFixture(
-            controls: [FakeControl(.wake, failure: .restore)]
+            controls: [
+                FakeControl(
+                    .wake,
+                    restorationMatches: false,
+                    failure: .restore
+                )
+            ]
         )
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let result = try await fixture.coordinator.restore()
@@ -597,7 +664,8 @@ struct CoordinatorTests {
         #expect(secondLog.events.isEmpty)
         await restoreGate.release()
         #expect(try await firstRestore.value.isFullyRestored == true)
-        #expect(store.exists == false)
+        #expect(store.exists)
+        #expect(try store.load().recoveryState == .prepared)
     }
 
     @Test("a replaced baseline makes restore fail and retains the replacement")
@@ -631,7 +699,7 @@ struct CoordinatorTests {
             restoreError = error
         }
 
-        #expect(restoreError == .baselineRemovalFailed)
+        #expect(restoreError == .baselinePreparationFailed)
         #expect(try fixture.store.load() == replacement)
         #expect(fixture.store.exists == true)
     }
@@ -778,6 +846,92 @@ private struct CoordinatorContinuityRunner: CommandRunning {
     }
 }
 
+private final class MixedContinuityRecoveryRunner: @unchecked Sendable, CommandRunning {
+    private let lock = NSLock()
+    private var advertising: PreferenceValue = .missing
+    private var receiving: PreferenceValue = .bool(false)
+    private var discoverableMode: PreferenceValue = .string("Off")
+    private var attemptedAlreadyMissingDelete = false
+    private var restoredReceiving = false
+    private var restoredDiscoverableMode = false
+
+    func run(executable: String, arguments: [String]) throws -> CommandResult {
+        guard executable == "/usr/bin/defaults" else {
+            return CommandResult(exitCode: 90, stdout: "", stderr: "unexpected executable")
+        }
+        return lock.withLock {
+            switch arguments {
+            case ["-currentHost", "read", "com.apple.coreservices.useractivityd"]:
+                return .init(
+                    exitCode: 0,
+                    stdout: Self.domain([
+                        "ActivityAdvertisingAllowed": advertising,
+                        "ActivityReceivingAllowed": receiving
+                    ]),
+                    stderr: ""
+                )
+            case ["read", "com.apple.sharingd"]:
+                return .init(
+                    exitCode: 0,
+                    stdout: Self.domain(["DiscoverableMode": discoverableMode]),
+                    stderr: ""
+                )
+            case [
+                "-currentHost", "delete", "com.apple.coreservices.useractivityd",
+                "ActivityAdvertisingAllowed"
+            ]:
+                attemptedAlreadyMissingDelete = true
+                guard advertising != .missing else {
+                    return .init(
+                        exitCode: 1,
+                        stdout: "",
+                        stderr: "Domain/default pair does not exist"
+                    )
+                }
+                advertising = .missing
+                return .init(exitCode: 0, stdout: "", stderr: "")
+            case [
+                "-currentHost", "write", "com.apple.coreservices.useractivityd",
+                "ActivityReceivingAllowed", "-bool", "true"
+            ]:
+                receiving = .bool(true)
+                restoredReceiving = true
+                return .init(exitCode: 0, stdout: "", stderr: "")
+            case [
+                "write", "com.apple.sharingd", "DiscoverableMode", "-string", "ContactsOnly"
+            ]:
+                discoverableMode = .string("ContactsOnly")
+                restoredDiscoverableMode = true
+                return .init(exitCode: 0, stdout: "", stderr: "")
+            default:
+                return .init(exitCode: 91, stdout: "", stderr: "unexpected arguments")
+            }
+        }
+    }
+
+    var didAttemptAlreadyMissingDelete: Bool {
+        lock.withLock { attemptedAlreadyMissingDelete }
+    }
+
+    var didRestoreRemainingPreferences: Bool {
+        lock.withLock { restoredReceiving && restoredDiscoverableMode }
+    }
+
+    private static func domain(_ values: [String: PreferenceValue]) -> String {
+        let assignments = values.compactMap { key, value -> String? in
+            switch value {
+            case .missing:
+                return nil
+            case .bool(let enabled):
+                return "\(key) = \(enabled ? 1 : 0);"
+            case .string(let value):
+                return "\(key) = \(value);"
+            }
+        }.sorted()
+        return "{ \(assignments.joined(separator: " ")) }"
+    }
+}
+
 private final class CoordinatorSettingsOpener: @unchecked Sendable,
     AirDropContinuitySettingsOpening
 {
@@ -790,6 +944,12 @@ private final class CoordinatorSettingsOpener: @unchecked Sendable,
 
     var openCount: Int {
         lock.withLock { storedOpenCount }
+    }
+}
+
+private struct FailingCoordinatorSettingsOpener: AirDropContinuitySettingsOpening {
+    func openAirDropAndContinuity() throws {
+        throw ContinuityControlError.settingsOpenFailed
     }
 }
 
