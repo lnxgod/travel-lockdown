@@ -14,17 +14,20 @@ struct ContinuitySnapshot: DeclaredNonSecretSnapshotModel, Equatable {
     let activityReceivingAllowed: PreferenceValue
     let discoverableMode: PreferenceValue
     let airPlayReceiverRecovery: ManualRecoveryMarker
+    let airPlayReceiverBaseline: AirPlayReceiverBaseline?
 
     init(
         activityAdvertisingAllowed: PreferenceValue,
         activityReceivingAllowed: PreferenceValue,
         discoverableMode: PreferenceValue,
-        airPlayReceiverRecovery: ManualRecoveryMarker = .unresolved
+        airPlayReceiverRecovery: ManualRecoveryMarker = .unresolved,
+        airPlayReceiverBaseline: AirPlayReceiverBaseline? = nil
     ) {
         self.activityAdvertisingAllowed = activityAdvertisingAllowed
         self.activityReceivingAllowed = activityReceivingAllowed
         self.discoverableMode = discoverableMode
         self.airPlayReceiverRecovery = airPlayReceiverRecovery
+        self.airPlayReceiverBaseline = airPlayReceiverBaseline
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -32,6 +35,7 @@ struct ContinuitySnapshot: DeclaredNonSecretSnapshotModel, Equatable {
         case activityReceivingAllowed
         case discoverableMode
         case airPlayReceiverRecovery
+        case airPlayReceiverBaseline
     }
 
     init(from decoder: any Decoder) throws {
@@ -49,6 +53,10 @@ struct ContinuitySnapshot: DeclaredNonSecretSnapshotModel, Equatable {
             ManualRecoveryMarker.self,
             forKey: .airPlayReceiverRecovery
         ) ?? .unresolved
+        airPlayReceiverBaseline = try container.decodeIfPresent(
+            AirPlayReceiverBaseline.self,
+            forKey: .airPlayReceiverBaseline
+        )
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -57,6 +65,7 @@ struct ContinuitySnapshot: DeclaredNonSecretSnapshotModel, Equatable {
         try container.encode(activityReceivingAllowed, forKey: .activityReceivingAllowed)
         try container.encode(discoverableMode, forKey: .discoverableMode)
         try container.encode(airPlayReceiverRecovery, forKey: .airPlayReceiverRecovery)
+        try container.encodeIfPresent(airPlayReceiverBaseline, forKey: .airPlayReceiverBaseline)
     }
 }
 
@@ -203,10 +212,22 @@ struct ContinuityControl: LockdownControl {
                 == captured.activityAdvertisingAllowed
             && current.activityReceivingAllowed == captured.activityReceivingAllowed
             && current.discoverableMode == captured.discoverableMode
+        if let airPlay = captured.airPlayReceiverBaseline {
+            return RestorationStatus(
+                id: id,
+                matchesSnapshot: automatedMatches,
+                detail: airPlay.recoveryInstruction,
+                manualRecovery: ManualRecoveryInstruction(
+                    pane: "System Settings > General > AirDrop & Continuity",
+                    action: airPlay.recoveryInstruction,
+                    confirmation: .userAttestation
+                )
+            )
+        }
         if captured.airPlayReceiverRecovery == .unresolved {
             return RestorationStatus(
                 id: id,
-                matchesSnapshot: false,
+                matchesSnapshot: automatedMatches,
                 detail: "Restore AirPlay Receiver in General > AirDrop & Continuity",
                 manualRecovery: ManualRecoveryInstruction(
                     pane: "System Settings > General > AirDrop & Continuity",
@@ -278,7 +299,19 @@ struct ContinuityControl: LockdownControl {
     ) throws {
         switch value {
         case .missing:
-            try execute(arguments: domainArguments + ["delete", domain, key])
+            let result = try runner.run(
+                executable: "/usr/bin/defaults",
+                arguments: domainArguments + ["delete", domain, key]
+            )
+            if result.exitCode != 0 {
+                let current = try read(
+                    domain: domain,
+                    currentHost: domainArguments == ["-currentHost"]
+                )
+                guard Self.preferenceValue(key, in: current) == nil else {
+                    throw ContinuityControlError.commandFailed
+                }
+            }
         case .bool(let bool):
             try execute(
                 arguments: domainArguments

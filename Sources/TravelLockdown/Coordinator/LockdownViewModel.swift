@@ -39,6 +39,7 @@ struct RestoreConfirmation: Equatable, Identifiable, Sendable {
 
 enum LockdownOperationPhase: Equatable, Sendable {
     case idle
+    case preparingRecovery
     case preparingPlan
     case enabling
     case restoring
@@ -49,6 +50,10 @@ enum LockdownModeState: Equatable, Sendable {
     case verified
     case attention
     case unmanaged
+
+    var isSwitchOn: Bool {
+        self == .verified || self == .attention
+    }
 }
 
 struct DryRunPlanReview: Equatable, Identifiable, Sendable {
@@ -84,14 +89,33 @@ struct OperationAttention: Equatable, Sendable {
     static let manualRecoveryRequired = OperationAttention(
         message: "Manual recovery required: one or more controls remain incomplete."
     )
+    static let recoverySetupFailed = OperationAttention(
+        message: "Recovery snapshot setup failed without changing any settings."
+    )
+    static let normalPostureRequired = OperationAttention(
+        message: "Recovery setup stopped because the current posture is locked or ambiguous. "
+            + "Restore a clearly normal state first; the app will not bless lockdown settings "
+            + "as your recovery target."
+    )
+    static let legacyRecoveryNotReady = OperationAttention(
+        message: "The older recovery snapshot cannot be replaced until every automatic setting "
+            + "has been restored and verified. The original snapshot was kept unchanged."
+    )
 }
 
 struct ManualRecoveryPrompt: Equatable, Identifiable, Sendable {
     let id: UUID
     let instructions: [ManualRecoveryInstruction]
+    let recoveryToken: String?
 
     var message: String {
         instructions.map { "\($0.action) in \($0.pane)" }.joined(separator: "\n")
+    }
+
+    var canConfirmCompletion: Bool {
+        !instructions.isEmpty
+            && recoveryToken != nil
+            && instructions.allSatisfy { $0.confirmation == .userAttestation }
     }
 }
 
@@ -104,6 +128,11 @@ final class LockdownViewModel: ObservableObject {
     @Published private(set) var pendingRestoreConfirmation: RestoreConfirmation?
     @Published private(set) var operationPhase: LockdownOperationPhase = .idle
     @Published private(set) var isRestoreAvailable = false
+    @Published private(set) var recoveryState: RecoveryState = .none
+    @Published private(set) var preparedRecoveryMatchesCurrent: Bool?
+    @Published private(set) var isRecoverySetupPresented = false
+    @Published private(set) var recoverySetupProfile = RecoverySetupProfile.recommended
+    @Published private(set) var recoverySetupReview: RecoverySetupReview?
     @Published private(set) var isStatusRefreshInProgress = false
     @Published private(set) var isStartupHydrationInProgress = false
     @Published private(set) var isStartupHydrated = false
@@ -125,13 +154,16 @@ final class LockdownViewModel: ObservableObject {
     }
 
     var lockdownModeState: LockdownModeState {
-        if isRestoreAvailable {
+        if recoveryState == .invalid {
+            return .unmanaged
+        }
+        if recoveryState == .active {
             return status?.isActive == true ? .verified : .attention
         }
-        guard let status else {
-            return .off
+        if recoveryState == .prepared {
+            return preparedRecoveryMatchesCurrent == true ? .off : .unmanaged
         }
-        return status.isClearlyUnlocked ? .off : .unmanaged
+        return status == nil ? .off : .unmanaged
     }
 
     var isLockdownModeInteractionDisabled: Bool {
@@ -140,11 +172,22 @@ final class LockdownViewModel: ObservableObject {
             || pendingPlanReview != nil
             || pendingConfirmation != nil
             || pendingRestoreConfirmation != nil
+            || isRecoverySetupPresented
             || isStatusRefreshInProgress
+            || (recoveryState == .prepared && preparedRecoveryMatchesCurrent != true)
     }
 
     var isLockdownModeToggleDisabled: Bool {
         isLockdownModeInteractionDisabled || lockdownModeState == .unmanaged
+    }
+
+    var canReplaceLegacyRecovery: Bool {
+        guard recoveryState == .active,
+              let prompt = manualRecoveryPrompt,
+              !prompt.instructions.isEmpty else {
+            return false
+        }
+        return prompt.instructions.allSatisfy { $0.confirmation == .unavailable }
     }
 
     @discardableResult
@@ -167,7 +210,8 @@ final class LockdownViewModel: ObservableObject {
 
     @discardableResult
     func requestEnable() -> Task<Void, Never>? {
-        guard !isStartupHydrationInProgress,
+        guard recoveryState != .invalid,
+              !isStartupHydrationInProgress,
               !isStatusRefreshInProgress,
               operationPhase == .idle,
               pendingRestoreConfirmation == nil,
@@ -207,11 +251,13 @@ final class LockdownViewModel: ObservableObject {
 
     @discardableResult
     func requestLockdownModeToggle() -> Task<Void, Never>? {
-        if isRestoreAvailable {
+        if recoveryState == .active {
             requestRestore()
             return nil
         }
-        guard lockdownModeState == .off else {
+        guard recoveryState == .prepared,
+              preparedRecoveryMatchesCurrent == true,
+              lockdownModeState == .off else {
             return nil
         }
         return requestEnable()
@@ -273,12 +319,15 @@ final class LockdownViewModel: ObservableObject {
                 operationAttention = nil
                 recoveryAttention = nil
                 manualRecoveryPrompt = nil
-                publishManualRecovery(from: result.status.controls.compactMap(\.manualRecovery))
+                publishManualRecovery(
+                    from: result.status.controls.compactMap(\.manualRecovery),
+                    recoveryToken: nil
+                )
             } catch {
                 operationAttention = .enableFailed
                 status = await coordinator.status()
             }
-            isRestoreAvailable = await coordinator.hasRecoveryState()
+            await refreshRecoveryState()
             guard case .enabling(let activeReviewID) = enableWorkflow,
                   activeReviewID == reviewID else {
                 return
@@ -326,7 +375,8 @@ final class LockdownViewModel: ObservableObject {
     }
 
     func restoreNormalState() async {
-        guard !isStatusRefreshInProgress else {
+        guard recoveryState != .invalid,
+              !isStatusRefreshInProgress else {
             return
         }
         do {
@@ -356,18 +406,184 @@ final class LockdownViewModel: ObservableObject {
                     manualRecoveryPrompt = nil
                 } else {
                     operationAttention = .manualRecoveryRequired
-                    publishManualRecovery(from: manualInstructions)
+                    publishManualRecovery(
+                        from: manualInstructions,
+                        recoveryToken: result.recoveryToken
+                    )
                 }
             }
         } catch {
             operationAttention = .restoreFailed
         }
         status = await coordinator.status()
-        isRestoreAvailable = await coordinator.hasRecoveryState()
+        await refreshRecoveryState()
     }
 
     func acknowledgeManualRecovery() {
         manualRecoveryPrompt = nil
+    }
+
+    @discardableResult
+    func presentRecoverySetup() -> Task<Void, Never>? {
+        guard recoveryState == .none || canReplaceLegacyRecovery,
+              isStartupHydrated,
+              operationPhase == .idle,
+              !isStatusRefreshInProgress,
+              !isRecoverySetupPresented else {
+            return nil
+        }
+        recoverySetupProfile = .recommended
+        recoverySetupReview = nil
+        operationAttention = nil
+        operationPhase = .preparingRecovery
+        return Task {
+            do {
+                recoverySetupReview = try await coordinator.reviewRecoverySetup()
+                isRecoverySetupPresented = true
+            } catch RecoverySetupError.normalPostureRequired {
+                operationAttention = .normalPostureRequired
+            } catch RecoverySetupError.legacyRecoveryNotEligible {
+                operationAttention = .legacyRecoveryNotReady
+            } catch {
+                operationAttention = .recoverySetupFailed
+            }
+            operationPhase = .idle
+        }
+    }
+
+    func cancelRecoverySetup() {
+        guard operationPhase == .idle else { return }
+        isRecoverySetupPresented = false
+        recoverySetupReview = nil
+    }
+
+    func setAirPlayReceiverEnabled(_ isEnabled: Bool) {
+        recoverySetupProfile.airPlayReceiver = AirPlayReceiverBaseline(
+            isEnabled: isEnabled,
+            access: recoverySetupProfile.airPlayReceiver.access,
+            requiresPassword: recoverySetupProfile.airPlayReceiver.requiresPassword
+        )
+    }
+
+    func setAirPlayReceiverAccess(_ access: AirPlayReceiverAccess) {
+        recoverySetupProfile.airPlayReceiver = AirPlayReceiverBaseline(
+            isEnabled: recoverySetupProfile.airPlayReceiver.isEnabled,
+            access: access,
+            requiresPassword: recoverySetupProfile.airPlayReceiver.requiresPassword
+        )
+    }
+
+    func setAirPlayReceiverPasswordRequired(_ isRequired: Bool) {
+        recoverySetupProfile.airPlayReceiver = AirPlayReceiverBaseline(
+            isEnabled: recoverySetupProfile.airPlayReceiver.isEnabled,
+            access: recoverySetupProfile.airPlayReceiver.access,
+            requiresPassword: isRequired
+        )
+    }
+
+    func setPersonalHotspotAutoJoin(_ mode: PersonalHotspotAutoJoinMode) {
+        recoverySetupProfile.personalHotspotAutoJoin = mode
+    }
+
+    func setSharingService(_ service: SharingService, enabled: Bool) {
+        recoverySetupProfile.sharingServices[service] = enabled
+    }
+
+    @discardableResult
+    func confirmRecoverySetup() -> Task<Void, Never>? {
+        guard isRecoverySetupPresented,
+              let review = recoverySetupReview,
+              (review.purpose == .newSnapshot && recoveryState == .none
+                || review.purpose == .legacyReplacement && recoveryState == .active
+                || review.purpose == .preparedReplacement && recoveryState == .prepared),
+              operationPhase == .idle,
+              !isStatusRefreshInProgress else {
+            return nil
+        }
+        let profile = recoverySetupProfile
+        operationPhase = .preparingRecovery
+        return Task {
+            do {
+                _ = try await coordinator.prepareRecovery(
+                    profile: profile,
+                    reviewToken: review.token
+                )
+                operationAttention = nil
+                isRecoverySetupPresented = false
+                recoverySetupReview = nil
+                if review.purpose == .legacyReplacement {
+                    manualRecoveryPrompt = nil
+                    recoveryAttention = nil
+                }
+            } catch RecoverySetupError.normalPostureRequired {
+                operationAttention = .normalPostureRequired
+            } catch RecoverySetupError.legacyRecoveryNotEligible {
+                operationAttention = .legacyRecoveryNotReady
+            } catch {
+                operationAttention = .recoverySetupFailed
+            }
+            await refreshRecoveryState()
+            status = await coordinator.status()
+            operationPhase = .idle
+        }
+    }
+
+    @discardableResult
+    func rebuildPreparedRecovery() -> Task<Void, Never>? {
+        guard recoveryState == .prepared,
+              preparedRecoveryMatchesCurrent != true,
+              operationPhase == .idle,
+              !isStatusRefreshInProgress,
+              !isRecoverySetupPresented else {
+            return nil
+        }
+        operationPhase = .preparingRecovery
+        operationAttention = nil
+        return Task {
+            do {
+                recoverySetupProfile = .recommended
+                recoverySetupReview = try await coordinator.reviewRecoverySetup()
+                isRecoverySetupPresented = true
+            } catch {
+                operationAttention = .recoverySetupFailed
+                await refreshRecoveryState()
+            }
+            operationPhase = .idle
+        }
+    }
+
+    @discardableResult
+    func confirmManualRecoveryCompletion() -> Task<Void, Never>? {
+        guard let prompt = manualRecoveryPrompt,
+              let recoveryToken = prompt.recoveryToken,
+              prompt.canConfirmCompletion,
+              recoveryState == .active,
+              operationPhase == .idle,
+              !isStatusRefreshInProgress else {
+            return nil
+        }
+        operationPhase = .restoring
+        return Task {
+            do {
+                let result = try await coordinator.completeManualRecovery(
+                    token: recoveryToken,
+                    instructions: prompt.instructions
+                )
+                if result.isFullyRestored {
+                    manualRecoveryPrompt = nil
+                    recoveryAttention = nil
+                    operationAttention = nil
+                } else {
+                    recoveryAttention = result.statuses.filter { !$0.matchesSnapshot }
+                    operationAttention = .restoreIncomplete
+                }
+            } catch {
+                operationAttention = .restoreFailed
+            }
+            status = await coordinator.status()
+            await refreshRecoveryState()
+            operationPhase = .idle
+        }
     }
 
     func refreshStatus() async {
@@ -383,9 +599,13 @@ final class LockdownViewModel: ObservableObject {
         defer { isStatusRefreshInProgress = false }
 
         let refreshedStatus = await coordinator.status()
-        let refreshedRestoreAvailability = await coordinator.hasRecoveryState()
+        let refreshedRecoveryState = await coordinator.recoveryState()
         status = refreshedStatus
-        isRestoreAvailable = refreshedRestoreAvailability
+        recoveryState = refreshedRecoveryState
+        isRestoreAvailable = refreshedRecoveryState == .active
+        preparedRecoveryMatchesCurrent = refreshedRecoveryState == .prepared
+            ? await coordinator.preparedRecoveryMatchesCurrent()
+            : nil
     }
 
     func refreshStatusIfIdle() async {
@@ -405,9 +625,24 @@ final class LockdownViewModel: ObservableObject {
         preflightReport = await preflightProvider.runPreflight()
     }
 
-    private func publishManualRecovery(from instructions: [ManualRecoveryInstruction]) {
+    private func publishManualRecovery(
+        from instructions: [ManualRecoveryInstruction],
+        recoveryToken: String?
+    ) {
         guard !instructions.isEmpty else { return }
-        manualRecoveryPrompt = ManualRecoveryPrompt(id: UUID(), instructions: instructions)
+        manualRecoveryPrompt = ManualRecoveryPrompt(
+            id: UUID(),
+            instructions: instructions,
+            recoveryToken: recoveryToken
+        )
+    }
+
+    private func refreshRecoveryState() async {
+        recoveryState = await coordinator.recoveryState()
+        isRestoreAvailable = recoveryState == .active
+        preparedRecoveryMatchesCurrent = recoveryState == .prepared
+            ? await coordinator.preparedRecoveryMatchesCurrent()
+            : nil
     }
 
     private enum EnableWorkflow {

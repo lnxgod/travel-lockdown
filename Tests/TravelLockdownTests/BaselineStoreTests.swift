@@ -67,22 +67,120 @@ struct BaselineStoreTests {
         #expect(try store.load() == baseline)
     }
 
-    @Test("baseline rejects a payload marked as a credential")
-    func baselineRejectsCredentialPayload() throws {
+    @Test("prepared recovery state round-trips and legacy state defaults active")
+    func recoveryStateRoundTripsWithSafeLegacyDefault() throws {
+        let preparedDirectory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: preparedDirectory) }
+        let preparedStore = BaselineStore(
+            directory: preparedDirectory,
+            modelRegistry: textSnapshotRegistry()
+        )
+        let prepared = LockdownBaseline(
+            version: 1,
+            capturedAt: Date(timeIntervalSince1970: 1),
+            snapshots: [
+                try ControlSnapshot.capturing(
+                    TextSnapshot(value: "reviewed"),
+                    for: .bluetooth
+                )
+            ],
+            recoveryState: .prepared
+        )
+        try preparedStore.save(prepared)
+        #expect(try preparedStore.load() == prepared)
+
+        let legacyDirectory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: legacyDirectory) }
+        let encoded = try JSONEncoder().encode(
+            LockdownBaseline(
+                version: 1,
+                capturedAt: Date(timeIntervalSince1970: 2),
+                snapshots: prepared.snapshots,
+                recoveryState: .active
+            )
+        )
+        var legacyObject = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "recoveryState")
+        try JSONSerialization.data(withJSONObject: legacyObject).write(
+            to: legacyDirectory.appendingPathComponent("baseline.json")
+        )
+        let legacyStore = BaselineStore(
+            directory: legacyDirectory,
+            modelRegistry: textSnapshotRegistry()
+        )
+
+        #expect(try legacyStore.load().recoveryState == .active)
+    }
+
+    @Test("runtime-only recovery states cannot be persisted")
+    func runtimeOnlyRecoveryStatesAreRejected() throws {
+        for recoveryState in [RecoveryState.none, .invalid] {
+            let directory = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = BaselineStore(directory: directory)
+            let baseline = LockdownBaseline(
+                version: 1,
+                capturedAt: Date(timeIntervalSince1970: 1),
+                snapshots: [],
+                recoveryState: recoveryState
+            )
+
+            #expect(throws: BaselineStoreError.invalidSnapshotPayload) {
+                try store.save(baseline)
+            }
+            #expect(store.exists == false)
+        }
+    }
+
+    @Test("only an unchanged prepared snapshot can be discarded")
+    func preparedRemovalIsStateAndIdentityBound() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = BaselineStore(directory: directory, modelRegistry: textSnapshotRegistry())
+        let prepared = LockdownBaseline(
+            version: 1,
+            capturedAt: Date(timeIntervalSince1970: 1),
+            snapshots: [
+                try ControlSnapshot.capturing(TextSnapshot(value: "reviewed"), for: .bluetooth)
+            ],
+            recoveryState: .prepared
+        )
+        try store.save(prepared)
+        let mismatched = LockdownBaseline(
+            version: prepared.version,
+            capturedAt: Date(timeIntervalSince1970: 2),
+            snapshots: prepared.snapshots,
+            recoveryState: .prepared
+        )
+
+        #expect(try store.removePrepared(matching: mismatched) == false)
+        #expect(store.exists)
+        #expect(try store.removePrepared(matching: prepared))
+        #expect(store.exists == false)
+    }
+
+    @Test("a declared non-Wi-Fi model still rejects a credential marker")
+    func declaredNonWiFiModelRejectsCredentialMarker() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = BaselineStore(directory: directory, modelRegistry: textSnapshotRegistry())
         let baseline = LockdownBaseline(
             version: 1,
             capturedAt: Date(),
             snapshots: [
                 try ControlSnapshot.capturing(
                     TextSnapshot(value: "password=secret"),
-                    for: .wifiPolicy
+                    for: .bluetooth
                 )
             ]
         )
 
         #expect(throws: BaselineStoreError.disallowedSecret) {
-            try BaselineStore.validate(baseline)
+            try store.save(baseline)
         }
+        #expect(store.exists == false)
     }
 
     @Test("saving a credential-bearing baseline preserves the last safe baseline")
@@ -120,6 +218,9 @@ struct BaselineStoreTests {
 
     @Test("all forbidden credential markers are rejected")
     func allForbiddenCredentialMarkersAreRejected() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = BaselineStore(directory: directory, modelRegistry: textSnapshotRegistry())
         let forbiddenMarkers = [
             "password=secret",
             "passphrase=secret",
@@ -135,15 +236,60 @@ struct BaselineStoreTests {
                 snapshots: [
                     try ControlSnapshot.capturing(
                         TextSnapshot(value: marker),
-                        for: .wifiPolicy
+                        for: .bluetooth
                     )
                 ]
             )
 
             #expect(throws: BaselineStoreError.disallowedSecret) {
-                try BaselineStore.validate(baseline)
+                try store.save(baseline)
             }
+            #expect(store.exists == false)
         }
+    }
+
+    @Test("typed Wi-Fi SSID values with credential markers round-trip")
+    func typedWiFiCredentialMarkerSSIDsRoundTrip() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = BaselineStore(directory: directory, modelRegistry: .travelLockdown)
+        let profiles = [
+            "password=guest",
+            "passphrase=guest",
+            "token=guest",
+            "recovery-key=guest",
+            "private-key=guest"
+        ].map {
+            WiFiNetworkProfileMetadata(networkName: $0, security: .wpa3Personal)
+        } + [
+            WiFiNetworkProfileMetadata(
+                ssidData: Data([0xff, 0x00, 0x3d, 0x01]),
+                networkName: nil,
+                security: .wpa2Enterprise
+            )
+        ]
+        let snapshot = WiFiPolicySnapshot(
+            preferredNetworks: profiles,
+            rememberJoinedNetworks: true,
+            requireAdministratorForAssociation: false,
+            requireAdministratorForPower: false,
+            requireAdministratorForIBSSMode: false
+        )
+        let baseline = LockdownBaseline(
+            version: 1,
+            capturedAt: Date(timeIntervalSince1970: 1),
+            snapshots: [try ControlSnapshot.capturing(snapshot, for: .wifiPolicy)]
+        )
+
+        try store.save(baseline)
+
+        let loaded = try store.load()
+        let loadedWiFi = try #require(loaded.snapshots.first).decoded(
+            as: WiFiPolicySnapshot.self,
+            for: .wifiPolicy
+        )
+        #expect(loaded == baseline)
+        #expect(loadedWiFi.preferredNetworks == profiles)
     }
 
     @Test("an undeclared snapshot model cannot be persisted")
@@ -373,7 +519,7 @@ struct BaselineStoreTests {
         #expect(store.exists == false)
     }
 
-    @Test("a partial restore never deletes the baseline")
+    @Test("a partial restore never prepares the active baseline")
     func partialRestoreRetainsBaseline() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -385,11 +531,12 @@ struct BaselineStoreTests {
             RestorationStatus(id: .continuity, matchesSnapshot: false, detail: "not restored")
         ])
 
-        #expect(try store.removeAfterVerifiedRestore(partial, matching: baseline) == false)
+        #expect(try store.prepareAfterVerifiedRestore(partial, matching: baseline) == false)
         #expect(store.exists == true)
+        #expect(try store.load() == baseline)
     }
 
-    @Test("a complete result for another control set cannot delete the loaded baseline")
+    @Test("a complete result for another control set cannot prepare the loaded baseline")
     func mismatchedRestoreResultRetainsBaseline() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -411,12 +558,13 @@ struct BaselineStoreTests {
             ]
         )
 
-        #expect(try store.removeAfterVerifiedRestore(forged, matching: baseline) == false)
+        #expect(try store.prepareAfterVerifiedRestore(forged, matching: baseline) == false)
         #expect(store.exists == true)
+        #expect(try store.load() == baseline)
     }
 
-    @Test("only a complete verified restore deletes the baseline")
-    func verifiedRestoreDeletesBaseline() throws {
+    @Test("only a complete verified restore atomically prepares the same baseline")
+    func verifiedRestorePreparesReusableBaseline() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = BaselineStore(directory: directory)
@@ -434,8 +582,15 @@ struct BaselineStoreTests {
             RestorationStatus(id: .bluetooth, matchesSnapshot: true, detail: "restored")
         ])
 
-        #expect(try store.removeAfterVerifiedRestore(complete, matching: baseline) == true)
-        #expect(store.exists == false)
+        #expect(try store.prepareAfterVerifiedRestore(complete, matching: baseline) == true)
+        let prepared = try store.load()
+        #expect(store.exists)
+        #expect(prepared.recoveryState == .prepared)
+        #expect(prepared.version == baseline.version)
+        #expect(prepared.capturedAt == baseline.capturedAt)
+        #expect(prepared.snapshots == baseline.snapshots)
+        #expect(try store.prepareAfterVerifiedRestore(complete, matching: prepared) == false)
+        #expect(try store.load() == prepared)
     }
 
     private func temporaryDirectory() throws -> URL {

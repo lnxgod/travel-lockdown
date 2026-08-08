@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Security
 
 protocol DeclaredNonSecretSnapshotModel: Codable, Sendable {
     static var snapshotModelID: String { get }
@@ -19,17 +20,42 @@ struct SnapshotModelRegistry: Sendable {
 
     mutating func register<Model: DeclaredNonSecretSnapshotModel>(
         _ model: Model.Type,
-        for controlID: ControlID
+        for controlID: ControlID,
+        secretMarkerValidationProjection: (@Sendable (Model) -> Model)? = nil
     ) {
         registrations[controlID] = Registration(
             modelID: Model.snapshotModelID,
             canonicalize: { payload in
+                if secretMarkerValidationProjection == nil {
+                    try BaselineStore.validatePayload(payload)
+                }
+
+                let decoded: Model
                 do {
-                    let decoded = try JSONDecoder().decode(Model.self, from: payload)
-                    return try SnapshotModelEncoder.encode(decoded)
+                    decoded = try JSONDecoder().decode(Model.self, from: payload)
                 } catch {
                     throw BaselineStoreError.invalidSnapshotPayload
                 }
+
+                let canonicalPayload: Data
+                do {
+                    canonicalPayload = try SnapshotModelEncoder.encode(decoded)
+                } catch {
+                    throw BaselineStoreError.invalidSnapshotPayload
+                }
+
+                if let secretMarkerValidationProjection {
+                    let validationPayload: Data
+                    do {
+                        validationPayload = try SnapshotModelEncoder.encode(
+                            secretMarkerValidationProjection(decoded)
+                        )
+                    } catch {
+                        throw BaselineStoreError.invalidSnapshotPayload
+                    }
+                    try BaselineStore.validatePayload(validationPayload)
+                }
+                return canonicalPayload
             }
         )
     }
@@ -149,7 +175,6 @@ struct ControlSnapshot: Codable, Equatable, Sendable {
         guard let registry = decoder.userInfo[.snapshotModelRegistry] as? SnapshotModelRegistry else {
             throw BaselineStoreError.undeclaredSnapshotModel
         }
-        try BaselineStore.validatePayload(payload)
         self = try registry.decodedSnapshot(id: id, modelID: modelID, payload: payload)
     }
 
@@ -165,6 +190,37 @@ struct LockdownBaseline: Codable, Equatable, Sendable {
     let version: Int
     let capturedAt: Date
     let snapshots: [ControlSnapshot]
+    let recoveryState: RecoveryState
+
+    init(
+        version: Int,
+        capturedAt: Date,
+        snapshots: [ControlSnapshot],
+        recoveryState: RecoveryState = .active
+    ) {
+        self.version = version
+        self.capturedAt = capturedAt
+        self.snapshots = snapshots
+        self.recoveryState = recoveryState
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case capturedAt
+        case snapshots
+        case recoveryState
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        capturedAt = try container.decode(Date.self, forKey: .capturedAt)
+        snapshots = try container.decode([ControlSnapshot].self, forKey: .snapshots)
+        recoveryState = try container.decodeIfPresent(
+            RecoveryState.self,
+            forKey: .recoveryState
+        ) ?? .active
+    }
 }
 
 struct RestorationStatus: Equatable, Sendable {
@@ -189,12 +245,24 @@ struct RestorationStatus: Equatable, Sendable {
 struct RestoreResult: Equatable, Sendable {
     let expectedIDs: Set<ControlID>
     let statuses: [RestorationStatus]
+    let recoveryToken: String?
+
+    init(
+        expectedIDs: Set<ControlID>,
+        statuses: [RestorationStatus],
+        recoveryToken: String? = nil
+    ) {
+        self.expectedIDs = expectedIDs
+        self.statuses = statuses
+        self.recoveryToken = recoveryToken
+    }
 
     var isFullyRestored: Bool {
         !expectedIDs.isEmpty
             && statuses.count == expectedIDs.count
             && Set(statuses.map(\.id)) == expectedIDs
             && Set(statuses.filter(\.matchesSnapshot).map(\.id)) == expectedIDs
+            && statuses.allSatisfy { $0.manualRecovery == nil }
     }
 }
 
@@ -202,6 +270,7 @@ enum BaselineStoreError: Error, Equatable {
     case disallowedSecret
     case undeclaredSnapshotModel
     case invalidSnapshotPayload
+    case secureRandomUnavailable
     case transactionUnavailable
     case transactionLockFailed
 }
@@ -279,6 +348,12 @@ private final class AdvisoryBaselineTransactionLock: @unchecked Sendable, Baseli
     }
 }
 
+private struct PendingRecoveryReview: Codable, Equatable {
+    let tokenHash: String
+    let purpose: RecoverySetupPurpose
+    let bindingFingerprint: String
+}
+
 final class BaselineTransaction: @unchecked Sendable {
     private let store: BaselineStore
     private let lock: any BaselineTransactionLock
@@ -300,11 +375,49 @@ final class BaselineTransaction: @unchecked Sendable {
         try store.saveUnlocked(baseline)
     }
 
-    func removeAfterVerifiedRestore(
+    func prepareAfterVerifiedRestore(
         _ result: RestoreResult,
         matching baseline: LockdownBaseline
     ) throws -> Bool {
-        try store.removeAfterVerifiedRestoreUnlocked(result, matching: baseline)
+        try store.prepareAfterVerifiedRestoreUnlocked(result, matching: baseline)
+    }
+
+    func removePrepared(matching baseline: LockdownBaseline) throws -> Bool {
+        try store.removePreparedUnlocked(matching: baseline)
+    }
+
+    func issueRecoveryReviewToken(
+        purpose: RecoverySetupPurpose,
+        bindingFingerprint: String
+    ) throws -> String {
+        try store.issueRecoveryReviewTokenUnlocked(
+            purpose: purpose,
+            bindingFingerprint: bindingFingerprint
+        )
+    }
+
+    func matchesRecoveryReview(
+        token: String,
+        purpose: RecoverySetupPurpose,
+        bindingFingerprint: String
+    ) -> Bool {
+        store.matchesRecoveryReviewUnlocked(
+            token: token,
+            purpose: purpose,
+            bindingFingerprint: bindingFingerprint
+        )
+    }
+
+    func discardRecoveryReviewIfMatching(
+        token: String,
+        purpose: RecoverySetupPurpose,
+        bindingFingerprint: String
+    ) {
+        store.discardRecoveryReviewIfMatchingUnlocked(
+            token: token,
+            purpose: purpose,
+            bindingFingerprint: bindingFingerprint
+        )
     }
 
     func release() {
@@ -319,6 +432,8 @@ final class BaselineTransaction: @unchecked Sendable {
 struct BaselineStore: Sendable {
     private static let baselineFilename = "baseline.json"
     private static let pendingFilename = "baseline.json.pending"
+    private static let recoveryReviewFilename = "recovery-review.json"
+    private static let pendingRecoveryReviewFilename = "recovery-review.json.pending"
 
     let directory: URL
     private let modelRegistry: SnapshotModelRegistry
@@ -349,13 +464,19 @@ struct BaselineStore: Sendable {
         try transaction.save(baseline)
     }
 
-    func removeAfterVerifiedRestore(
+    func prepareAfterVerifiedRestore(
         _ result: RestoreResult,
         matching baseline: LockdownBaseline
     ) throws -> Bool {
         let transaction = try beginExclusiveTransaction()
         defer { transaction.release() }
-        return try transaction.removeAfterVerifiedRestore(result, matching: baseline)
+        return try transaction.prepareAfterVerifiedRestore(result, matching: baseline)
+    }
+
+    func removePrepared(matching baseline: LockdownBaseline) throws -> Bool {
+        let transaction = try beginExclusiveTransaction()
+        defer { transaction.release() }
+        return try transaction.removePrepared(matching: baseline)
     }
 
     func beginExclusiveTransaction() throws -> BaselineTransaction {
@@ -370,29 +491,22 @@ struct BaselineStore: Sendable {
         let decoder = JSONDecoder()
         decoder.userInfo[.snapshotModelRegistry] = modelRegistry
         let baseline = try decoder.decode(LockdownBaseline.self, from: data)
-        try Self.validate(baseline)
+        try Self.validateEnvelope(baseline)
         return baseline
     }
 
     fileprivate func saveUnlocked(_ baseline: LockdownBaseline) throws {
-        try Self.validate(baseline)
+        try Self.validateEnvelope(baseline)
         let canonicalBaseline = LockdownBaseline(
             version: baseline.version,
             capturedAt: baseline.capturedAt,
-            snapshots: try baseline.snapshots.map(modelRegistry.canonicalized)
+            snapshots: try baseline.snapshots.map(modelRegistry.canonicalized),
+            recoveryState: baseline.recoveryState
         )
-        try Self.validate(canonicalBaseline)
+        try Self.validateEnvelope(canonicalBaseline)
 
         let fileManager = FileManager.default
-        try fileManager.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try fileManager.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: directory.path
-        )
+        try ensureOwnerOnlyDirectory()
 
         let data = try JSONEncoder().encode(canonicalBaseline)
         try data.write(to: pendingURL, options: .atomic)
@@ -420,9 +534,167 @@ struct BaselineStore: Sendable {
         )
     }
 
-    static func validate(_ baseline: LockdownBaseline) throws {
-        for snapshot in baseline.snapshots {
-            try validatePayload(snapshot.payload)
+    fileprivate func issueRecoveryReviewTokenUnlocked(
+        purpose: RecoverySetupPurpose,
+        bindingFingerprint: String
+    ) throws -> String {
+        guard Self.isLowercaseHexDigest(bindingFingerprint) else {
+            throw BaselineStoreError.invalidSnapshotPayload
+        }
+
+        var token: String
+        var tokenHash: String
+        let previousTokenHash = loadRecoveryReviewRecordUnlocked()?.tokenHash
+        repeat {
+            token = try Self.randomRecoveryReviewToken()
+            tokenHash = RecoverySnapshotFingerprint.tokenHash(token)
+        } while tokenHash == previousTokenHash
+
+        let record = PendingRecoveryReview(
+            tokenHash: tokenHash,
+            purpose: purpose,
+            bindingFingerprint: bindingFingerprint
+        )
+        try saveRecoveryReviewRecordUnlocked(record)
+        return token
+    }
+
+    fileprivate func matchesRecoveryReviewUnlocked(
+        token: String,
+        purpose: RecoverySetupPurpose,
+        bindingFingerprint: String
+    ) -> Bool {
+        guard Self.isLowercaseHexDigest(token),
+              Self.isLowercaseHexDigest(bindingFingerprint),
+              let record = loadRecoveryReviewRecordUnlocked(),
+              record.purpose == purpose,
+              record.bindingFingerprint == bindingFingerprint else {
+            return false
+        }
+        return Self.constantTimeEqual(
+            record.tokenHash,
+            RecoverySnapshotFingerprint.tokenHash(token)
+        )
+    }
+
+    fileprivate func discardRecoveryReviewIfMatchingUnlocked(
+        token: String,
+        purpose: RecoverySetupPurpose,
+        bindingFingerprint: String
+    ) {
+        guard matchesRecoveryReviewUnlocked(
+            token: token,
+            purpose: purpose,
+            bindingFingerprint: bindingFingerprint
+        ) else {
+            return
+        }
+        try? FileManager.default.removeItem(at: recoveryReviewURL)
+    }
+
+    private func saveRecoveryReviewRecordUnlocked(_ record: PendingRecoveryReview) throws {
+        try Self.validateRecoveryReviewRecord(record)
+        try ensureOwnerOnlyDirectory()
+
+        let fileManager = FileManager.default
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(record)
+        try data.write(to: pendingRecoveryReviewURL, options: .atomic)
+        defer {
+            try? fileManager.removeItem(at: pendingRecoveryReviewURL)
+        }
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: pendingRecoveryReviewURL.path
+        )
+
+        if fileManager.fileExists(atPath: recoveryReviewURL.path) {
+            _ = try fileManager.replaceItemAt(
+                recoveryReviewURL,
+                withItemAt: pendingRecoveryReviewURL,
+                options: [.usingNewMetadataOnly]
+            )
+        } else {
+            try fileManager.moveItem(at: pendingRecoveryReviewURL, to: recoveryReviewURL)
+        }
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: recoveryReviewURL.path
+        )
+    }
+
+    private func loadRecoveryReviewRecordUnlocked() -> PendingRecoveryReview? {
+        guard let data = try? Data(contentsOf: recoveryReviewURL),
+              let record = try? JSONDecoder().decode(PendingRecoveryReview.self, from: data),
+              (try? Self.validateRecoveryReviewRecord(record)) != nil else {
+            return nil
+        }
+        return record
+    }
+
+    private func ensureOwnerOnlyDirectory() throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directory.path
+        )
+    }
+
+    private static func validateRecoveryReviewRecord(_ record: PendingRecoveryReview) throws {
+        guard isLowercaseHexDigest(record.tokenHash),
+              isLowercaseHexDigest(record.bindingFingerprint) else {
+            throw BaselineStoreError.invalidSnapshotPayload
+        }
+    }
+
+    private static func randomRecoveryReviewToken() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = bytes.withUnsafeMutableBytes { buffer -> OSStatus in
+            guard let baseAddress = buffer.baseAddress else { return errSecParam }
+            return SecRandomCopyBytes(kSecRandomDefault, buffer.count, baseAddress)
+        }
+        guard status == errSecSuccess else {
+            throw BaselineStoreError.secureRandomUnavailable
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isLowercaseHexDigest(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy {
+            ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
+        }
+    }
+
+    private static func constantTimeEqual(_ left: String, _ right: String) -> Bool {
+        let leftBytes = Array(left.utf8)
+        let rightBytes = Array(right.utf8)
+        guard leftBytes.count == rightBytes.count else { return false }
+        return zip(leftBytes, rightBytes).reduce(UInt8.zero) { difference, pair in
+            difference | (pair.0 ^ pair.1)
+        } == 0
+    }
+
+    fileprivate func removePreparedUnlocked(matching baseline: LockdownBaseline) throws -> Bool {
+        guard baseline.recoveryState == .prepared,
+              exists,
+              try loadUnlocked() == baseline else {
+            return false
+        }
+        try FileManager.default.removeItem(at: baselineURL)
+        return !exists
+    }
+
+    private static func validateEnvelope(_ baseline: LockdownBaseline) throws {
+        guard baseline.version == 1,
+              baseline.recoveryState == .active
+                || baseline.recoveryState == .prepared else {
+            throw BaselineStoreError.invalidSnapshotPayload
         }
     }
 
@@ -434,20 +706,27 @@ struct BaselineStore: Sendable {
         }
     }
 
-    fileprivate func removeAfterVerifiedRestoreUnlocked(
+    fileprivate func prepareAfterVerifiedRestoreUnlocked(
         _ result: RestoreResult,
         matching baseline: LockdownBaseline
     ) throws -> Bool {
         let baselineIDs = baseline.snapshots.map(\.id)
-        guard result.isFullyRestored,
+        guard baseline.recoveryState == .active,
+              result.isFullyRestored,
               Set(baselineIDs).count == baselineIDs.count,
               Set(baselineIDs) == result.expectedIDs,
               try loadUnlocked() == baseline else {
             return false
         }
 
-        try FileManager.default.removeItem(at: baselineURL)
-        return true
+        let prepared = LockdownBaseline(
+            version: baseline.version,
+            capturedAt: baseline.capturedAt,
+            snapshots: baseline.snapshots,
+            recoveryState: .prepared
+        )
+        try saveUnlocked(prepared)
+        return try loadUnlocked() == prepared
     }
 
     private var baselineURL: URL {
@@ -456,5 +735,13 @@ struct BaselineStore: Sendable {
 
     private var pendingURL: URL {
         directory.appendingPathComponent(Self.pendingFilename)
+    }
+
+    private var recoveryReviewURL: URL {
+        directory.appendingPathComponent(Self.recoveryReviewFilename)
+    }
+
+    private var pendingRecoveryReviewURL: URL {
+        directory.appendingPathComponent(Self.pendingRecoveryReviewFilename)
     }
 }

@@ -36,8 +36,16 @@ enum StatusReaders {
     static func firewallStealth(_ output: String) -> Bool? {
         parseEnabledDisabled(
             output,
-            enabled: ["Stealth mode is on", "Stealth mode enabled"],
-            disabled: ["Stealth mode is off", "Stealth mode disabled"]
+            enabled: [
+                "Stealth mode is on",
+                "Stealth mode enabled",
+                "Firewall stealth mode is on"
+            ],
+            disabled: [
+                "Stealth mode is off",
+                "Stealth mode disabled",
+                "Firewall stealth mode is off"
+            ]
         )
     }
 
@@ -46,12 +54,14 @@ enum StatusReaders {
             output,
             enabled: [
                 "Block all is on",
+                "Firewall has block all state set to enabled.",
                 "Firewall is set to block all non-essential incoming connections",
                 "Firewall is set to block all non-essential incoming connections."
             ],
             disabled: [
                 "Block all is off",
                 "Block all DISABLED!",
+                "Firewall has block all state set to disabled.",
                 "Firewall is set to allow specific services and applications."
             ]
         )

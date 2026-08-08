@@ -4,7 +4,7 @@ import Testing
 
 @Suite("CoordinatorTests")
 struct CoordinatorTests {
-    @Test("coordinator captures all baselines before applying the first control")
+    @Test("live enable uses the reviewed baseline without recapturing current settings")
     func coordinatorSnapshotsBeforeApplying() async throws {
         let log = EventLog()
         let fixture = try coordinatorFixture(
@@ -19,8 +19,6 @@ struct CoordinatorTests {
 
         #expect(
             log.events == [
-                "capture:bluetooth",
-                "capture:continuity",
                 "apply:bluetooth",
                 "apply:continuity"
             ]
@@ -40,7 +38,7 @@ struct CoordinatorTests {
         #expect(fixture.store.exists == true)
     }
 
-    @Test("a retry after failed activation preserves the original normal-state baseline")
+    @Test("a retry after failed activation preserves the reviewed normal-state baseline")
     func repeatedEnablePreservesOriginalBaseline() async throws {
         let log = EventLog()
         let captureSequence = FakeCaptureSequence([true, false])
@@ -70,7 +68,7 @@ struct CoordinatorTests {
                 )
             ]
         )
-        #expect(log.events.filter { $0 == "capture:bluetooth" }.count == 1)
+        #expect(log.events.filter { $0 == "capture:bluetooth" }.isEmpty)
     }
 
     @Test("an invalid existing baseline fails before capture or apply")
@@ -94,6 +92,11 @@ struct CoordinatorTests {
             baselineStore: store
         )
         var didThrow = false
+
+        #expect(await coordinator.recoveryState() == .invalid)
+        #expect(await coordinator.hasRecoveryState())
+        #expect(log.events.isEmpty)
+        #expect(try Data(contentsOf: baselineURL) == invalidBaseline)
 
         do {
             _ = try await coordinator.enable(dryRun: false)
@@ -142,6 +145,10 @@ struct CoordinatorTests {
                 baselineStore: store
             )
             var didThrow = false
+
+            #expect(await coordinator.recoveryState() == .invalid)
+            #expect(log.events.isEmpty)
+            #expect(try Data(contentsOf: baselineURL) == originalBaseline)
 
             do {
                 _ = try await coordinator.enable(dryRun: false)
@@ -216,7 +223,8 @@ struct CoordinatorTests {
             controls: [
                 FakeControl(.bluetooth, log: log, recordPlan: true),
                 FakeControl(.wifiPolicy, log: log, recordPlan: true)
-            ]
+            ],
+            seedActiveBaseline: false
         )
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
@@ -244,8 +252,6 @@ struct CoordinatorTests {
 
         #expect(
             log.events == [
-                "capture:bluetooth",
-                "capture:continuity",
                 "apply:bluetooth",
                 "verify:bluetooth",
                 "apply:continuity",
@@ -282,22 +288,30 @@ struct CoordinatorTests {
         let log = EventLog()
         let fixture = try coordinatorFixture(
             controls: [
-                FakeControl(.bluetooth, log: log),
-                FakeControl(.continuity, log: log, failure: .capture),
-                FakeControl(.wake, log: log)
-            ]
+                FakeControl(.bluetooth, log: log, verification: .nonCompliant),
+                FakeControl(
+                    .continuity,
+                    log: log,
+                    verification: .nonCompliant,
+                    failure: .capture
+                ),
+                FakeControl(.wifiPolicy, log: log, verification: .nonCompliant),
+                FakeControl(.ingress, log: log, verification: .nonCompliant),
+                FakeControl(.wake, log: log, verification: .nonCompliant)
+            ],
+            seedActiveBaseline: false
         )
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        await #expect(throws: FakeControlError.requestedFailure) {
-            try await fixture.coordinator.enable(dryRun: false)
+        await #expect(throws: RecoverySetupError.captureFailed(.continuity)) {
+            try await fixture.coordinator.reviewRecoverySetup()
         }
 
         #expect(log.events == ["capture:bluetooth", "capture:continuity"])
         #expect(fixture.store.exists == false)
     }
 
-    @Test("baseline validation failure occurs before every apply")
+    @Test("missing recovery state fails before capture or apply")
     func baselineSaveFailurePreventsMutation() async throws {
         let log = EventLog()
         let directory = FileManager.default.temporaryDirectory
@@ -309,11 +323,11 @@ struct CoordinatorTests {
             baselineStore: store
         )
 
-        await #expect(throws: BaselineStoreError.undeclaredSnapshotModel) {
+        await #expect(throws: RecoverySetupError.recoveryStateRequired) {
             try await coordinator.enable(dryRun: false)
         }
 
-        #expect(log.events == ["capture:bluetooth"])
+        #expect(log.events.isEmpty)
         #expect(store.exists == false)
     }
 
@@ -334,7 +348,8 @@ struct CoordinatorTests {
     func statusIsReadOnly() async throws {
         let log = EventLog()
         let fixture = try coordinatorFixture(
-            controls: [FakeControl(.bluetooth, log: log, recordVerification: true)]
+            controls: [FakeControl(.bluetooth, log: log, recordVerification: true)],
+            seedActiveBaseline: false
         )
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
@@ -355,7 +370,6 @@ struct CoordinatorTests {
             ]
         )
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        _ = try await fixture.coordinator.enable(dryRun: false)
         log.removeAll()
 
         let result = try await fixture.coordinator.restore()
@@ -370,7 +384,8 @@ struct CoordinatorTests {
         )
         #expect(result.expectedIDs == Set([ControlID.bluetooth, ControlID.continuity]))
         #expect(result.isFullyRestored == true)
-        #expect(fixture.store.exists == false)
+        #expect(fixture.store.exists)
+        #expect(try fixture.store.load().recoveryState == .prepared)
     }
 
     @Test("restore uses baseline comparison and retains a mismatched baseline")
@@ -385,8 +400,6 @@ struct CoordinatorTests {
             ]
         )
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        _ = try await fixture.coordinator.enable(dryRun: false)
-
         let result = try await fixture.coordinator.restore()
 
         #expect(result.statuses == [
@@ -400,7 +413,7 @@ struct CoordinatorTests {
         #expect(fixture.store.exists == true)
     }
 
-    @Test("unresolved AirPlay recovery marker prevents baseline deletion")
+    @Test("unresolved AirPlay recovery marker keeps the baseline active")
     func unresolvedAirPlayRetainsBaseline() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -433,20 +446,84 @@ struct CoordinatorTests {
 
         #expect(result.isFullyRestored == false)
         #expect(result.statuses.first?.id == .continuity)
-        #expect(result.statuses.first?.matchesSnapshot == false)
+        #expect(result.statuses.first?.matchesSnapshot == true)
         #expect(result.statuses.first?.detail.contains("AirPlay Receiver") == true)
         #expect(store.exists == true)
         #expect(opener.openCount == 1)
     }
 
+    @Test("active mixed Continuity recovery can retry and complete")
+    func activeMixedContinuityRecoveryCanRetryAndComplete() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = BaselineStore(directory: directory, modelRegistry: .travelLockdown)
+        let snapshot = try ControlSnapshot.capturing(
+            ContinuitySnapshot(
+                activityAdvertisingAllowed: .missing,
+                activityReceivingAllowed: .bool(true),
+                discoverableMode: .string("ContactsOnly"),
+                airPlayReceiverBaseline: AirPlayReceiverBaseline(
+                    isEnabled: true,
+                    access: .currentUser,
+                    requiresPassword: true
+                )
+            ),
+            for: .continuity
+        )
+        try store.save(
+            LockdownBaseline(
+                version: 1,
+                capturedAt: Date(timeIntervalSince1970: 1),
+                snapshots: [snapshot],
+                recoveryState: .active
+            )
+        )
+        let runner = MixedContinuityRecoveryRunner()
+        let coordinator = LockdownCoordinator(
+            controls: [
+                ContinuityControl(
+                    runner: runner,
+                    airPlayVerifier: .unavailable,
+                    settingsOpener: FailingCoordinatorSettingsOpener()
+                )
+            ],
+            baselineStore: store
+        )
+
+        let result = try await coordinator.restore()
+
+        #expect(result.isFullyRestored == false)
+        #expect(result.statuses.first?.matchesSnapshot == true)
+        #expect(result.statuses.first?.manualRecovery?.confirmation == .userAttestation)
+        #expect(runner.didAttemptAlreadyMissingDelete)
+        #expect(runner.didRestoreRemainingPreferences)
+        #expect(store.exists)
+
+        let instruction = try #require(result.statuses.first?.manualRecovery)
+        let token = try #require(result.recoveryToken)
+        let completed = try await coordinator.completeManualRecovery(
+            token: token,
+            instructions: [instruction]
+        )
+
+        #expect(completed.isFullyRestored)
+        #expect(store.exists)
+        #expect(try store.load().recoveryState == .prepared)
+    }
+
     @Test("restore errors remain per-control mismatches and preserve the baseline")
     func restoreErrorPreservesBaseline() async throws {
         let fixture = try coordinatorFixture(
-            controls: [FakeControl(.wake, failure: .restore)]
+            controls: [
+                FakeControl(
+                    .wake,
+                    restorationMatches: false,
+                    failure: .restore
+                )
+            ]
         )
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        _ = try await fixture.coordinator.enable(dryRun: false)
-
         let result = try await fixture.coordinator.restore()
 
         #expect(result.statuses.count == 1)
@@ -460,11 +537,18 @@ struct CoordinatorTests {
     func concurrentMutationIsRejected() async throws {
         let gate = CaptureGate()
         let fixture = try coordinatorFixture(
-            controls: [FakeControl(.bluetooth, captureGate: gate)]
+            controls: ControlID.allCases.map {
+                FakeControl(
+                    $0,
+                    verification: .nonCompliant,
+                    captureGate: $0 == .bluetooth ? gate : nil
+                )
+            },
+            seedActiveBaseline: false
         )
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        let firstEnable = Task {
-            try await fixture.coordinator.enable(dryRun: false)
+        let firstReview = Task {
+            try? await fixture.coordinator.reviewRecoverySetup()
         }
         await gate.waitUntilBlocked()
 
@@ -481,7 +565,7 @@ struct CoordinatorTests {
         await Task.yield()
         await gate.release()
 
-        #expect(try await firstEnable.value.status.controls.count == 1)
+        _ = await firstReview.value
         #expect(await secondEnable.value == true)
     }
 
@@ -491,27 +575,38 @@ struct CoordinatorTests {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         var registry = SnapshotModelRegistry()
-        registry.register(FakeSnapshot.self, for: .bluetooth)
+        for id in ControlID.allCases {
+            registry.register(FakeSnapshot.self, for: id)
+        }
         let store = BaselineStore(directory: directory, modelRegistry: registry)
         let captureGate = CaptureGate()
         let firstLog = EventLog()
         let secondLog = EventLog()
         let first = LockdownCoordinator(
-            controls: [FakeControl(.bluetooth, log: firstLog, captureGate: captureGate)],
+            controls: ControlID.allCases.map {
+                FakeControl(
+                    $0,
+                    log: firstLog,
+                    verification: .nonCompliant,
+                    captureGate: $0 == .bluetooth ? captureGate : nil
+                )
+            },
             baselineStore: store
         )
         let second = LockdownCoordinator(
-            controls: [FakeControl(.bluetooth, log: secondLog)],
+            controls: ControlID.allCases.map {
+                FakeControl($0, log: secondLog, verification: .nonCompliant)
+            },
             baselineStore: store
         )
-        let firstEnable = Task {
-            try await first.enable(dryRun: false)
+        let firstReview = Task {
+            try? await first.reviewRecoverySetup()
         }
         await captureGate.waitUntilBlocked()
 
         var competingMutationError: BaselineStoreError?
         do {
-            _ = try await second.enable(dryRun: false)
+            _ = try await second.reviewRecoverySetup()
         } catch let error as BaselineStoreError {
             competingMutationError = error
         }
@@ -519,7 +614,7 @@ struct CoordinatorTests {
         #expect(competingMutationError == .transactionUnavailable)
         #expect(secondLog.events.isEmpty)
         await captureGate.release()
-        _ = try await firstEnable.value
+        _ = await firstReview.value
     }
 
     @Test("separate coordinators reject a competing restore before control work")
@@ -530,11 +625,19 @@ struct CoordinatorTests {
         var registry = SnapshotModelRegistry()
         registry.register(FakeSnapshot.self, for: .bluetooth)
         let store = BaselineStore(directory: directory, modelRegistry: registry)
-        let setup = LockdownCoordinator(
-            controls: [FakeControl(.bluetooth)],
-            baselineStore: store
+        try store.save(
+            LockdownBaseline(
+                version: 1,
+                capturedAt: Date(timeIntervalSince1970: 1),
+                snapshots: [
+                    try ControlSnapshot.capturing(
+                        FakeSnapshot(wasEnabled: true),
+                        for: .bluetooth
+                    )
+                ],
+                recoveryState: .active
+            )
         )
-        _ = try await setup.enable(dryRun: false)
 
         let restoreGate = CaptureGate()
         let firstLog = EventLog()
@@ -570,7 +673,8 @@ struct CoordinatorTests {
         #expect(secondLog.events.isEmpty)
         await restoreGate.release()
         #expect(try await firstRestore.value.isFullyRestored == true)
-        #expect(store.exists == false)
+        #expect(store.exists)
+        #expect(try store.load().recoveryState == .prepared)
     }
 
     @Test("a replaced baseline makes restore fail and retains the replacement")
@@ -585,7 +689,6 @@ struct CoordinatorTests {
             ]
         )
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        _ = try await fixture.coordinator.enable(dryRun: false)
         let replacement = LockdownBaseline(
             version: 1,
             capturedAt: Date(timeIntervalSince1970: 2),
@@ -605,13 +708,14 @@ struct CoordinatorTests {
             restoreError = error
         }
 
-        #expect(restoreError == .baselineRemovalFailed)
+        #expect(restoreError == .baselinePreparationFailed)
         #expect(try fixture.store.load() == replacement)
         #expect(fixture.store.exists == true)
     }
 
     private func coordinatorFixture(
-        controls: [FakeControl]
+        controls: [FakeControl],
+        seedActiveBaseline: Bool = true
     ) throws -> (coordinator: LockdownCoordinator, store: BaselineStore, directory: URL) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -620,6 +724,21 @@ struct CoordinatorTests {
             registry.register(FakeSnapshot.self, for: id)
         }
         let store = BaselineStore(directory: directory, modelRegistry: registry)
+        if seedActiveBaseline {
+            try store.save(
+                LockdownBaseline(
+                    version: 1,
+                    capturedAt: Date(timeIntervalSince1970: 1),
+                    snapshots: try controls.map {
+                        try ControlSnapshot.capturing(
+                            FakeSnapshot(wasEnabled: true),
+                            for: $0.id
+                        )
+                    },
+                    recoveryState: .active
+                )
+            )
+        }
         return (LockdownCoordinator(controls: controls, baselineStore: store), store, directory)
     }
 }
@@ -736,6 +855,92 @@ private struct CoordinatorContinuityRunner: CommandRunning {
     }
 }
 
+private final class MixedContinuityRecoveryRunner: @unchecked Sendable, CommandRunning {
+    private let lock = NSLock()
+    private var advertising: PreferenceValue = .missing
+    private var receiving: PreferenceValue = .bool(false)
+    private var discoverableMode: PreferenceValue = .string("Off")
+    private var attemptedAlreadyMissingDelete = false
+    private var restoredReceiving = false
+    private var restoredDiscoverableMode = false
+
+    func run(executable: String, arguments: [String]) throws -> CommandResult {
+        guard executable == "/usr/bin/defaults" else {
+            return CommandResult(exitCode: 90, stdout: "", stderr: "unexpected executable")
+        }
+        return lock.withLock {
+            switch arguments {
+            case ["-currentHost", "read", "com.apple.coreservices.useractivityd"]:
+                return .init(
+                    exitCode: 0,
+                    stdout: Self.domain([
+                        "ActivityAdvertisingAllowed": advertising,
+                        "ActivityReceivingAllowed": receiving
+                    ]),
+                    stderr: ""
+                )
+            case ["read", "com.apple.sharingd"]:
+                return .init(
+                    exitCode: 0,
+                    stdout: Self.domain(["DiscoverableMode": discoverableMode]),
+                    stderr: ""
+                )
+            case [
+                "-currentHost", "delete", "com.apple.coreservices.useractivityd",
+                "ActivityAdvertisingAllowed"
+            ]:
+                attemptedAlreadyMissingDelete = true
+                guard advertising != .missing else {
+                    return .init(
+                        exitCode: 1,
+                        stdout: "",
+                        stderr: "Domain/default pair does not exist"
+                    )
+                }
+                advertising = .missing
+                return .init(exitCode: 0, stdout: "", stderr: "")
+            case [
+                "-currentHost", "write", "com.apple.coreservices.useractivityd",
+                "ActivityReceivingAllowed", "-bool", "true"
+            ]:
+                receiving = .bool(true)
+                restoredReceiving = true
+                return .init(exitCode: 0, stdout: "", stderr: "")
+            case [
+                "write", "com.apple.sharingd", "DiscoverableMode", "-string", "ContactsOnly"
+            ]:
+                discoverableMode = .string("ContactsOnly")
+                restoredDiscoverableMode = true
+                return .init(exitCode: 0, stdout: "", stderr: "")
+            default:
+                return .init(exitCode: 91, stdout: "", stderr: "unexpected arguments")
+            }
+        }
+    }
+
+    var didAttemptAlreadyMissingDelete: Bool {
+        lock.withLock { attemptedAlreadyMissingDelete }
+    }
+
+    var didRestoreRemainingPreferences: Bool {
+        lock.withLock { restoredReceiving && restoredDiscoverableMode }
+    }
+
+    private static func domain(_ values: [String: PreferenceValue]) -> String {
+        let assignments = values.compactMap { key, value -> String? in
+            switch value {
+            case .missing:
+                return nil
+            case .bool(let enabled):
+                return "\(key) = \(enabled ? 1 : 0);"
+            case .string(let value):
+                return "\(key) = \(value);"
+            }
+        }.sorted()
+        return "{ \(assignments.joined(separator: " ")) }"
+    }
+}
+
 private final class CoordinatorSettingsOpener: @unchecked Sendable,
     AirDropContinuitySettingsOpening
 {
@@ -748,6 +953,12 @@ private final class CoordinatorSettingsOpener: @unchecked Sendable,
 
     var openCount: Int {
         lock.withLock { storedOpenCount }
+    }
+}
+
+private struct FailingCoordinatorSettingsOpener: AirDropContinuitySettingsOpening {
+    func openAirDropAndContinuity() throws {
+        throw ContinuityControlError.settingsOpenFailed
     }
 }
 
