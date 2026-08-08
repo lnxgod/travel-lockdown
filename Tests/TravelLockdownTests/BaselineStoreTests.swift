@@ -114,6 +114,26 @@ struct BaselineStoreTests {
         #expect(try legacyStore.load().recoveryState == .active)
     }
 
+    @Test("runtime-only recovery states cannot be persisted")
+    func runtimeOnlyRecoveryStatesAreRejected() throws {
+        for recoveryState in [RecoveryState.none, .invalid] {
+            let directory = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = BaselineStore(directory: directory)
+            let baseline = LockdownBaseline(
+                version: 1,
+                capturedAt: Date(timeIntervalSince1970: 1),
+                snapshots: [],
+                recoveryState: recoveryState
+            )
+
+            #expect(throws: BaselineStoreError.invalidSnapshotPayload) {
+                try store.save(baseline)
+            }
+            #expect(store.exists == false)
+        }
+    }
+
     @Test("only an unchanged prepared snapshot can be discarded")
     func preparedRemovalIsStateAndIdentityBound() throws {
         let directory = try temporaryDirectory()
@@ -141,22 +161,26 @@ struct BaselineStoreTests {
         #expect(store.exists == false)
     }
 
-    @Test("baseline rejects a payload marked as a credential")
-    func baselineRejectsCredentialPayload() throws {
+    @Test("a declared non-Wi-Fi model still rejects a credential marker")
+    func declaredNonWiFiModelRejectsCredentialMarker() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = BaselineStore(directory: directory, modelRegistry: textSnapshotRegistry())
         let baseline = LockdownBaseline(
             version: 1,
             capturedAt: Date(),
             snapshots: [
                 try ControlSnapshot.capturing(
                     TextSnapshot(value: "password=secret"),
-                    for: .wifiPolicy
+                    for: .bluetooth
                 )
             ]
         )
 
         #expect(throws: BaselineStoreError.disallowedSecret) {
-            try BaselineStore.validate(baseline)
+            try store.save(baseline)
         }
+        #expect(store.exists == false)
     }
 
     @Test("saving a credential-bearing baseline preserves the last safe baseline")
@@ -194,6 +218,9 @@ struct BaselineStoreTests {
 
     @Test("all forbidden credential markers are rejected")
     func allForbiddenCredentialMarkersAreRejected() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = BaselineStore(directory: directory, modelRegistry: textSnapshotRegistry())
         let forbiddenMarkers = [
             "password=secret",
             "passphrase=secret",
@@ -209,15 +236,60 @@ struct BaselineStoreTests {
                 snapshots: [
                     try ControlSnapshot.capturing(
                         TextSnapshot(value: marker),
-                        for: .wifiPolicy
+                        for: .bluetooth
                     )
                 ]
             )
 
             #expect(throws: BaselineStoreError.disallowedSecret) {
-                try BaselineStore.validate(baseline)
+                try store.save(baseline)
             }
+            #expect(store.exists == false)
         }
+    }
+
+    @Test("typed Wi-Fi SSID values with credential markers round-trip")
+    func typedWiFiCredentialMarkerSSIDsRoundTrip() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = BaselineStore(directory: directory, modelRegistry: .travelLockdown)
+        let profiles = [
+            "password=guest",
+            "passphrase=guest",
+            "token=guest",
+            "recovery-key=guest",
+            "private-key=guest"
+        ].map {
+            WiFiNetworkProfileMetadata(networkName: $0, security: .wpa3Personal)
+        } + [
+            WiFiNetworkProfileMetadata(
+                ssidData: Data([0xff, 0x00, 0x3d, 0x01]),
+                networkName: nil,
+                security: .wpa2Enterprise
+            )
+        ]
+        let snapshot = WiFiPolicySnapshot(
+            preferredNetworks: profiles,
+            rememberJoinedNetworks: true,
+            requireAdministratorForAssociation: false,
+            requireAdministratorForPower: false,
+            requireAdministratorForIBSSMode: false
+        )
+        let baseline = LockdownBaseline(
+            version: 1,
+            capturedAt: Date(timeIntervalSince1970: 1),
+            snapshots: [try ControlSnapshot.capturing(snapshot, for: .wifiPolicy)]
+        )
+
+        try store.save(baseline)
+
+        let loaded = try store.load()
+        let loadedWiFi = try #require(loaded.snapshots.first).decoded(
+            as: WiFiPolicySnapshot.self,
+            for: .wifiPolicy
+        )
+        #expect(loaded == baseline)
+        #expect(loadedWiFi.preferredNetworks == profiles)
     }
 
     @Test("an undeclared snapshot model cannot be persisted")

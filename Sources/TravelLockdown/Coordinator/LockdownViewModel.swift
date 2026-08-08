@@ -154,6 +154,9 @@ final class LockdownViewModel: ObservableObject {
     }
 
     var lockdownModeState: LockdownModeState {
+        if recoveryState == .invalid {
+            return .unmanaged
+        }
         if recoveryState == .active {
             return status?.isActive == true ? .verified : .attention
         }
@@ -207,7 +210,8 @@ final class LockdownViewModel: ObservableObject {
 
     @discardableResult
     func requestEnable() -> Task<Void, Never>? {
-        guard !isStartupHydrationInProgress,
+        guard recoveryState != .invalid,
+              !isStartupHydrationInProgress,
               !isStatusRefreshInProgress,
               operationPhase == .idle,
               pendingRestoreConfirmation == nil,
@@ -371,7 +375,8 @@ final class LockdownViewModel: ObservableObject {
     }
 
     func restoreNormalState() async {
-        guard !isStatusRefreshInProgress else {
+        guard recoveryState != .invalid,
+              !isStatusRefreshInProgress else {
             return
         }
         do {
@@ -489,7 +494,8 @@ final class LockdownViewModel: ObservableObject {
         guard isRecoverySetupPresented,
               let review = recoverySetupReview,
               (review.purpose == .newSnapshot && recoveryState == .none
-                || review.purpose == .legacyReplacement && recoveryState == .active),
+                || review.purpose == .legacyReplacement && recoveryState == .active
+                || review.purpose == .preparedReplacement && recoveryState == .prepared),
               operationPhase == .idle,
               !isStatusRefreshInProgress else {
             return nil
@@ -535,9 +541,6 @@ final class LockdownViewModel: ObservableObject {
         operationAttention = nil
         return Task {
             do {
-                try await coordinator.discardPreparedRecovery()
-                recoveryState = .none
-                preparedRecoveryMatchesCurrent = nil
                 recoverySetupProfile = .recommended
                 recoverySetupReview = try await coordinator.reviewRecoverySetup()
                 isRecoverySetupPresented = true

@@ -93,6 +93,11 @@ struct CoordinatorTests {
         )
         var didThrow = false
 
+        #expect(await coordinator.recoveryState() == .invalid)
+        #expect(await coordinator.hasRecoveryState())
+        #expect(log.events.isEmpty)
+        #expect(try Data(contentsOf: baselineURL) == invalidBaseline)
+
         do {
             _ = try await coordinator.enable(dryRun: false)
         } catch {
@@ -140,6 +145,10 @@ struct CoordinatorTests {
                 baselineStore: store
             )
             var didThrow = false
+
+            #expect(await coordinator.recoveryState() == .invalid)
+            #expect(log.events.isEmpty)
+            #expect(try Data(contentsOf: baselineURL) == originalBaseline)
 
             do {
                 _ = try await coordinator.enable(dryRun: false)

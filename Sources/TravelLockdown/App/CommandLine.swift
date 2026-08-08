@@ -120,6 +120,10 @@ enum RecoveryReviewCommandLine {
                 stdout(
                     "Legacy recovery: automatic values are verified; review the missing manual values below.\n"
                 )
+            } else if result.purpose == .preparedReplacement {
+                stdout(
+                    "Prepared recovery rebuild: the previous snapshot remains until this review is confirmed and verified.\n"
+                )
             }
             for item in result.items {
                 stdout("\(item.control.rawValue): \(item.summary)\n")

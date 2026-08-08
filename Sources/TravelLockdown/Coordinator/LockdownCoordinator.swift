@@ -5,7 +5,11 @@ extension SnapshotModelRegistry {
         var registry = SnapshotModelRegistry()
         registry.register(BluetoothSnapshot.self, for: .bluetooth)
         registry.register(ContinuitySnapshot.self, for: .continuity)
-        registry.register(WiFiPolicySnapshot.self, for: .wifiPolicy)
+        registry.register(
+            WiFiPolicySnapshot.self,
+            for: .wifiPolicy,
+            secretMarkerValidationProjection: { $0.redactingSSIDValuesForSecretValidation() }
+        )
         registry.register(IngressSnapshot.self, for: .ingress)
         registry.register(WakeSnapshot.self, for: .wake)
         return registry
@@ -229,7 +233,13 @@ actor LockdownCoordinator: LockdownCoordinating {
         guard baselineStore.exists else {
             return .none
         }
-        return (try? baselineStore.load().recoveryState) ?? .active
+        do {
+            let baseline = try baselineStore.load()
+            try validateControlSet(in: baseline)
+            return baseline.recoveryState
+        } catch {
+            return .invalid
+        }
     }
 
     func reviewRecoverySetup() async throws -> RecoverySetupReview {
@@ -241,11 +251,34 @@ actor LockdownCoordinator: LockdownCoordinating {
         if baselineTransaction.exists {
             let baseline = try baselineTransaction.load()
             try validateControlSet(in: baseline)
+            if baseline.recoveryState == .prepared {
+                try await requireClearlyNormalPosture()
+                let snapshots = try await captureStableSnapshots()
+                try await requireClearlyNormalPosture()
+                let bindingFingerprint = try RecoverySnapshotFingerprint.preparedReplacement(
+                    original: baseline,
+                    snapshots: snapshots
+                )
+                let token = try baselineTransaction.issueRecoveryReviewToken(
+                    purpose: .preparedReplacement,
+                    bindingFingerprint: bindingFingerprint
+                )
+                return try RecoverySetupReview.make(
+                    from: snapshots,
+                    token: token,
+                    purpose: .preparedReplacement
+                )
+            }
             try await requireLegacyAutomaticRecoveryComplete(baseline)
+            let bindingFingerprint = try RecoverySnapshotFingerprint.baseline(baseline)
+            let token = try baselineTransaction.issueRecoveryReviewToken(
+                purpose: .legacyReplacement,
+                bindingFingerprint: bindingFingerprint
+            )
             return try RecoverySetupReview.make(
                 from: baseline.snapshots,
                 capturedAt: baseline.capturedAt,
-                token: RecoverySnapshotFingerprint.baseline(baseline),
+                token: token,
                 purpose: .legacyReplacement
             )
         }
@@ -253,7 +286,12 @@ actor LockdownCoordinator: LockdownCoordinating {
         try await requireClearlyNormalPosture()
         let snapshots = try await captureStableSnapshots()
         try await requireClearlyNormalPosture()
-        return try RecoverySetupReview.make(from: snapshots)
+        let bindingFingerprint = try RecoverySnapshotFingerprint.snapshots(snapshots)
+        let token = try baselineTransaction.issueRecoveryReviewToken(
+            purpose: .newSnapshot,
+            bindingFingerprint: bindingFingerprint
+        )
+        return try RecoverySetupReview.make(from: snapshots, token: token)
     }
 
     func prepareRecovery(
@@ -270,8 +308,72 @@ actor LockdownCoordinator: LockdownCoordinating {
         if baselineTransaction.exists {
             let original = try baselineTransaction.load()
             try validateControlSet(in: original)
+
+            if original.recoveryState == .prepared {
+                try await requireClearlyNormalPosture()
+                let automaticSnapshots = try await captureStableSnapshots()
+                let bindingFingerprint = try RecoverySnapshotFingerprint.preparedReplacement(
+                    original: original,
+                    snapshots: automaticSnapshots
+                )
+                guard baselineTransaction.matchesRecoveryReview(
+                    token: reviewToken,
+                    purpose: .preparedReplacement,
+                    bindingFingerprint: bindingFingerprint
+                ) else {
+                    throw RecoverySetupError.reviewTokenMismatch
+                }
+                try await requireClearlyNormalPosture()
+
+                let candidate = LockdownBaseline(
+                    version: original.version,
+                    capturedAt: .now,
+                    snapshots: try automaticSnapshots.map(reviewedProfile.reviewing),
+                    recoveryState: .prepared
+                )
+                try validateControlSet(in: candidate)
+                guard try baselineTransaction.load() == original else {
+                    throw RecoverySetupError.savedBaselineMismatch
+                }
+                do {
+                    try baselineTransaction.save(candidate)
+                    guard try baselineTransaction.load() == candidate else {
+                        throw RecoverySetupError.savedBaselineMismatch
+                    }
+                    let verifiedAutomaticSnapshots = try await captureStableSnapshots()
+                    let verifiedSnapshots = try verifiedAutomaticSnapshots.map(
+                        reviewedProfile.reviewing
+                    )
+                    guard verifiedSnapshots == candidate.snapshots else {
+                        throw RecoverySetupError.settingsChangedDuringReview
+                    }
+                    try await requireClearlyNormalPosture()
+                } catch {
+                    try rollbackRecoveryReplacement(
+                        candidate: candidate,
+                        original: original,
+                        transaction: baselineTransaction
+                    )
+                    throw error
+                }
+                baselineTransaction.discardRecoveryReviewIfMatching(
+                    token: reviewToken,
+                    purpose: .preparedReplacement,
+                    bindingFingerprint: bindingFingerprint
+                )
+                return RecoverySetupResult(
+                    capturedAt: candidate.capturedAt,
+                    controlCount: candidate.snapshots.count
+                )
+            }
+
             try await requireLegacyAutomaticRecoveryComplete(original)
-            guard try RecoverySnapshotFingerprint.baseline(original) == reviewToken else {
+            let bindingFingerprint = try RecoverySnapshotFingerprint.baseline(original)
+            guard baselineTransaction.matchesRecoveryReview(
+                token: reviewToken,
+                purpose: .legacyReplacement,
+                bindingFingerprint: bindingFingerprint
+            ) else {
                 throw RecoverySetupError.reviewTokenMismatch
             }
 
@@ -282,27 +384,30 @@ actor LockdownCoordinator: LockdownCoordinating {
                 recoveryState: .prepared
             )
             try validateControlSet(in: candidate)
-            try baselineTransaction.save(candidate)
-            guard try baselineTransaction.load() == candidate else {
-                try rollbackLegacyReplacement(
-                    candidate: candidate,
-                    original: original,
-                    transaction: baselineTransaction
-                )
+            guard try baselineTransaction.load() == original else {
                 throw RecoverySetupError.savedBaselineMismatch
             }
             do {
+                try baselineTransaction.save(candidate)
+                guard try baselineTransaction.load() == candidate else {
+                    throw RecoverySetupError.savedBaselineMismatch
+                }
                 guard try await preparedBaselineMatchesCurrent(candidate) else {
                     throw RecoverySetupError.settingsChangedDuringReview
                 }
             } catch {
-                try rollbackLegacyReplacement(
+                try rollbackRecoveryReplacement(
                     candidate: candidate,
                     original: original,
                     transaction: baselineTransaction
                 )
                 throw error
             }
+            baselineTransaction.discardRecoveryReviewIfMatching(
+                token: reviewToken,
+                purpose: .legacyReplacement,
+                bindingFingerprint: bindingFingerprint
+            )
             return RecoverySetupResult(
                 capturedAt: candidate.capturedAt,
                 controlCount: candidate.snapshots.count
@@ -311,7 +416,12 @@ actor LockdownCoordinator: LockdownCoordinating {
 
         try await requireClearlyNormalPosture()
         let automaticSnapshots = try await captureStableSnapshots()
-        guard try RecoverySnapshotFingerprint.snapshots(automaticSnapshots) == reviewToken else {
+        let bindingFingerprint = try RecoverySnapshotFingerprint.snapshots(automaticSnapshots)
+        guard baselineTransaction.matchesRecoveryReview(
+            token: reviewToken,
+            purpose: .newSnapshot,
+            bindingFingerprint: bindingFingerprint
+        ) else {
             throw RecoverySetupError.reviewTokenMismatch
         }
         try await requireClearlyNormalPosture()
@@ -340,6 +450,11 @@ actor LockdownCoordinator: LockdownCoordinating {
             }
             throw error
         }
+        baselineTransaction.discardRecoveryReviewIfMatching(
+            token: reviewToken,
+            purpose: .newSnapshot,
+            bindingFingerprint: bindingFingerprint
+        )
         return RecoverySetupResult(
             capturedAt: baseline.capturedAt,
             controlCount: baseline.snapshots.count
@@ -521,12 +636,16 @@ actor LockdownCoordinator: LockdownCoordinating {
         }
     }
 
-    private func rollbackLegacyReplacement(
+    private func rollbackRecoveryReplacement(
         candidate: LockdownBaseline,
         original: LockdownBaseline,
         transaction: BaselineTransaction
     ) throws {
-        guard try transaction.load() == candidate else {
+        let current = try transaction.load()
+        if current == original {
+            return
+        }
+        guard current == candidate else {
             throw RecoverySetupError.savedBaselineMismatch
         }
         try transaction.save(original)

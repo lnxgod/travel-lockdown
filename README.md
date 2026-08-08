@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="Assets/gamechangers-ai.png" width="112" alt="GameChangers AI logo">
+  <img src="Assets/friend-or-foe-shield.png" width="112" alt="Friend or Foe shield logo">
 </p>
 
 # Travel Lockdown
 
-**A free, open-source GameChangers AI menu-bar tool for a quieter Mac while traveling.**
+**A free, open-source Friend or Foe tool by GameChangers AI for a quieter Mac while traveling.**
 
 Travel Lockdown keeps Wi-Fi available for deliberate manual connections while reducing routine radio, discovery, auto-join, inbound-network, sharing, and wake exposure. Before Lockdown can turn on, it requires an owner-only, non-credential recovery snapshot that you review while the Mac is clearly in its normal posture. Recovery stays inside the same menu-bar switch.
 
@@ -50,11 +50,16 @@ Before opening the app, you can run the read-only status path:
 swift run TravelLockdown --status --dry-run
 ```
 
-You can also print a redacted, read-only recovery review. Saved Wi-Fi names are never printed:
+You can also print a redacted recovery review. It does not change Mac settings or the recovery
+snapshot, and saved Wi-Fi names are never printed:
 
 ```zsh
 swift run TravelLockdown --review-recovery
 ```
+
+Each successful review replaces an owner-only pending verifier with a fresh opaque 256-bit token.
+Only the token's SHA-256 hash, review purpose, and internal state-binding fingerprint are persisted;
+the token and Wi-Fi names are not written to that verifier.
 
 Then launch the app:
 
@@ -64,7 +69,7 @@ open build/TravelLockdown.app
 
 ## Use the switch
 
-Click the GameChangers logo in the menu bar.
+Click the Travel Lockdown shield in the menu bar.
 
 1. Choose **Set Up Recovery Snapshot** while the Mac is in its normal posture.
 2. Review the redacted automatic settings and record the normal AirPlay Receiver, Personal Hotspot auto-join, and Sharing values that macOS requires you to manage manually.
@@ -74,11 +79,15 @@ Click the GameChangers logo in the menu bar.
 
 The coordinator checks for a complete, clearly unlocked status before review, before save, and after save. It refuses to create a new recovery target from settings that already appear locked or ambiguous. A prepared snapshot must still exactly match the Mac before activation; it is promoted to active recovery state before the first lockdown mutation.
 
+If a reusable prepared snapshot no longer matches, **Rebuild Recovery Snapshot** reviews a fresh stable capture while retaining the previous snapshot. Cancellation or any failed review leaves the old file exact; confirmation replaces it only when the opaque token's owner-only verifier still matches the old snapshot and fresh capture, and the new prepared snapshot verifies. Rebuilding does not apply or restore settings.
+
 The switch stays left when off and moves right whenever Lockdown has an active recovery state. It is green when every registered control verifies and orange when Lockdown is on but a protection or manual check still needs attention. The orange state remains recoverable from the same switch; it does not pretend incomplete verification is fully secure.
 
 To recover, turn the same switch off and confirm **Restore Normal State**. If recovery is partial, keep the app and its baseline installed and complete the listed System Settings steps. Dismissing a manual instruction never marks it restored. After every automatic and manual item verifies, the exact active snapshot is atomically returned to prepared state instead of being deleted. The switch is then ready for another trip, provided the prepared snapshot still exactly matches the Mac before the next activation.
 
 Older snapshots that did not record the manual settings are retained until all automatic values restore. The app then offers **Review Missing Recovery Settings** and atomically replaces the old active snapshot with a reviewed prepared snapshot; any failed check leaves the old snapshot unchanged.
+
+If `baseline.json` exists but cannot be decoded, validated, or matched to the exact registered control set, the app labels it invalid instead of offering restore or setup. It leaves the file unchanged for investigation and disables automatic activation, restoration, and replacement; verify the Mac's settings and recover manually or from a known-good copy before changing that file.
 
 ## Emergency recovery
 
@@ -103,7 +112,7 @@ swift run TravelLockdown --prepare-recovery \
   --confirmed
 ```
 
-The accepted alternatives are `on|off`, `current-user|same-network|everyone`, `required|not-required`, `never|ask-to-join|automatic`, and `all-off|all-on`. A stale token, an ambiguous posture, or any setting drift fails without creating a snapshot.
+The accepted alternatives are `on|off`, `current-user|same-network|everyone`, `required|not-required`, `never|ask-to-join|automatic`, and `all-off|all-on`. Review tokens are random, single-pending-review capabilities: starting another review invalidates the previous token. A stale token, an ambiguous posture, or any setting drift fails without creating or replacing a snapshot.
 
 ## Known limitations
 

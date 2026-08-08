@@ -5,6 +5,7 @@ enum RecoveryState: String, Codable, Equatable, Sendable {
     case none
     case prepared
     case active
+    case invalid
 }
 
 enum AirPlayReceiverAccess: String, Codable, CaseIterable, Equatable, Sendable {
@@ -165,9 +166,10 @@ struct RecoverySetupReviewItem: Equatable, Sendable {
     let summary: String
 }
 
-enum RecoverySetupPurpose: Equatable, Sendable {
+enum RecoverySetupPurpose: String, Codable, Equatable, Sendable {
     case newSnapshot
     case legacyReplacement
+    case preparedReplacement
 }
 
 struct RecoverySetupReview: Equatable, Sendable {
@@ -191,13 +193,13 @@ struct RecoverySetupReview: Equatable, Sendable {
     static func make(
         from snapshots: [ControlSnapshot],
         capturedAt: Date = .now,
-        token: String? = nil,
+        token: String,
         purpose: RecoverySetupPurpose = .newSnapshot
     ) throws
         -> RecoverySetupReview
     {
         RecoverySetupReview(
-            token: try token ?? RecoverySnapshotFingerprint.snapshots(snapshots),
+            token: token,
             capturedAt: capturedAt,
             items: try snapshots.map(Self.reviewItem),
             purpose: purpose
@@ -280,12 +282,33 @@ struct RecoverySetupReview: Equatable, Sendable {
 }
 
 enum RecoverySnapshotFingerprint {
+    private struct PreparedReplacementReview: Encodable {
+        let original: LockdownBaseline
+        let snapshots: [ControlSnapshot]
+    }
+
     static func snapshots(_ snapshots: [ControlSnapshot]) throws -> String {
         try digest(snapshots)
     }
 
     static func baseline(_ baseline: LockdownBaseline) throws -> String {
         try digest(baseline)
+    }
+
+    static func preparedReplacement(
+        original: LockdownBaseline,
+        snapshots: [ControlSnapshot]
+    ) throws -> String {
+        try digest(
+            PreparedReplacementReview(
+                original: original,
+                snapshots: snapshots
+            )
+        )
+    }
+
+    static func tokenHash(_ token: String) -> String {
+        SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func digest<Value: Encodable>(_ value: Value) throws -> String {

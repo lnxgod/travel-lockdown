@@ -148,9 +148,83 @@ struct ViewModelTests {
         await rebuild?.value
 
         #expect(model.isRecoverySetupPresented)
-        #expect(model.recoveryState == .none)
-        #expect(await coordinator.discardCount() == 1)
+        #expect(model.recoveryState == .prepared)
+        #expect(model.recoverySetupReview?.purpose == .preparedReplacement)
+        #expect(await coordinator.discardCount() == 0)
         #expect(await coordinator.mutationCounts() == (prepare: 0, enable: 0, restore: 0))
+
+        model.cancelRecoverySetup()
+        #expect(model.isRecoverySetupPresented == false)
+        #expect(model.recoveryState == .prepared)
+        #expect(await coordinator.discardCount() == 0)
+
+        await model.rebuildPreparedRecovery()?.value
+        await model.confirmRecoverySetup()?.value
+        #expect(model.recoveryState == .prepared)
+        #expect(model.preparedRecoveryMatchesCurrent == true)
+        #expect(await coordinator.mutationCounts() == (prepare: 1, enable: 0, restore: 0))
+    }
+
+    @Test("a failed prepared replacement review keeps recovery available")
+    @MainActor
+    func failedPreparedReplacementReviewKeepsOriginal() async {
+        let coordinator = RecoverySetupFakeCoordinator(
+            recoveryState: .prepared,
+            preparedMatches: false,
+            reviewFails: true
+        )
+        let model = LockdownViewModel(
+            coordinator: coordinator,
+            preflightProvider: FakePreflightProvider()
+        )
+        await model.beginStartupHydration()?.value
+
+        await model.rebuildPreparedRecovery()?.value
+
+        #expect(model.recoveryState == .prepared)
+        #expect(model.isRecoverySetupPresented == false)
+        #expect(model.operationAttention == .recoverySetupFailed)
+        #expect(await coordinator.discardCount() == 0)
+        #expect(await coordinator.mutationCounts() == (prepare: 0, enable: 0, restore: 0))
+    }
+
+    @Test("invalid recovery is attention-only and cannot invoke automatic mutations")
+    @MainActor
+    func invalidRecoveryDisablesAutomaticActions() async {
+        let fullyCompliant = LockdownStatus.make(controls: ControlID.allCases.map {
+            ControlStatus(id: $0, verification: .compliant, detail: "verified")
+        })
+        let coordinator = RecoverySetupFakeCoordinator(
+            recoveryState: .invalid,
+            status: fullyCompliant
+        )
+        let model = LockdownViewModel(
+            coordinator: coordinator,
+            preflightProvider: FakePreflightProvider()
+        )
+        await model.beginStartupHydration()?.value
+
+        #expect(model.recoveryState == .invalid)
+        #expect(model.lockdownModeState == .unmanaged)
+        #expect(model.lockdownModeState != .verified)
+        #expect(model.lockdownModeState.isSwitchOn == false)
+        #expect(model.isRestoreAvailable == false)
+        #expect(model.isLockdownModeToggleDisabled)
+        #expect(model.requestEnable() == nil)
+        #expect(model.requestLockdownModeToggle() == nil)
+        #expect(model.presentRecoverySetup() == nil)
+        #expect(model.rebuildPreparedRecovery() == nil)
+        model.requestRestore()
+        #expect(model.pendingRestoreConfirmation == nil)
+        await model.restoreNormalState()
+        #expect(await coordinator.mutationCounts() == (prepare: 0, enable: 0, restore: 0))
+        #expect(await coordinator.discardCount() == 0)
+        #expect(
+            MenuView.lockdownAccessibilityValue(
+                for: model.lockdownModeState,
+                recoveryState: model.recoveryState
+            ) == "Recovery snapshot invalid; automatic changes unavailable"
+        )
     }
 
     @Test("preflight never invokes a control apply operation")
@@ -1070,6 +1144,8 @@ private actor RecoverySetupFakeCoordinator: LockdownCoordinating {
     private var storedRecoveryState: RecoveryState
     private var preparedMatches: Bool
     private let restoreCompletes: Bool
+    private let currentStatus: LockdownStatus
+    private let reviewFails: Bool
     private var prepareCalls = 0
     private var enableCalls = 0
     private var restoreCalls = 0
@@ -1078,11 +1154,17 @@ private actor RecoverySetupFakeCoordinator: LockdownCoordinating {
     init(
         recoveryState: RecoveryState = .none,
         preparedMatches: Bool = true,
-        restoreCompletes: Bool = false
+        restoreCompletes: Bool = false,
+        status: LockdownStatus? = nil,
+        reviewFails: Bool = false
     ) {
         storedRecoveryState = recoveryState
         self.preparedMatches = preparedMatches
         self.restoreCompletes = restoreCompletes
+        currentStatus = status ?? .make(controls: ControlID.allCases.map {
+            ControlStatus(id: $0, verification: .nonCompliant, detail: "normal")
+        })
+        self.reviewFails = reviewFails
     }
 
     func enable(dryRun: Bool) async throws -> CoordinatorResult {
@@ -1094,7 +1176,7 @@ private actor RecoverySetupFakeCoordinator: LockdownCoordinating {
         }
         enableCalls += 1
         storedRecoveryState = .active
-        return CoordinatorResult(status: normalStatus, dryRunPlan: nil)
+        return CoordinatorResult(status: currentStatus, dryRunPlan: nil)
     }
 
     func restore() async throws -> RestoreResult {
@@ -1117,7 +1199,7 @@ private actor RecoverySetupFakeCoordinator: LockdownCoordinating {
     }
 
     func status() async -> LockdownStatus {
-        normalStatus
+        currentStatus
     }
 
     func hasRecoveryState() async -> Bool {
@@ -1129,12 +1211,24 @@ private actor RecoverySetupFakeCoordinator: LockdownCoordinating {
     }
 
     func reviewRecoverySetup() async throws -> RecoverySetupReview {
-        RecoverySetupReview(
+        if reviewFails {
+            throw RecoverySetupError.settingsChangedDuringReview
+        }
+        let purpose: RecoverySetupPurpose = switch storedRecoveryState {
+        case .prepared:
+            .preparedReplacement
+        case .active:
+            .legacyReplacement
+        case .none, .invalid:
+            .newSnapshot
+        }
+        return RecoverySetupReview(
             token: String(repeating: "a", count: 64),
             capturedAt: Date(timeIntervalSince1970: 1),
             items: ControlID.allCases.map {
                 RecoverySetupReviewItem(control: $0, summary: "Reviewed \($0.rawValue)")
-            }
+            },
+            purpose: purpose
         )
     }
 
@@ -1182,11 +1276,6 @@ private actor RecoverySetupFakeCoordinator: LockdownCoordinating {
         storedDiscardCount
     }
 
-    private var normalStatus: LockdownStatus {
-        .make(controls: ControlID.allCases.map {
-            ControlStatus(id: $0, verification: .nonCompliant, detail: "normal")
-        })
-    }
 }
 
 private final class AttentionCoordinator: @unchecked Sendable, LockdownCoordinating {

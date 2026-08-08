@@ -41,11 +41,11 @@ struct MenuView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            GameChangersBrandLogo(size: 42)
+            FriendOrFoeBrandLogo(size: 42, state: markState)
             VStack(alignment: .leading, spacing: 1) {
                 Text("TRAVEL LOCKDOWN")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
-                Text("A free GameChangers AI tool")
+                Text("A Friend or Foe tool by GameChangers AI")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -199,20 +199,10 @@ struct MenuView: View {
 
     private var recoverySetupCard: some View {
         actionCard(
-            title: model.recoverySetupReview?.purpose == .legacyReplacement
-                ? "Finish Legacy Recovery"
-                : "Set Up Recovery Snapshot",
+            title: recoverySetupTitle,
             symbol: "externaldrive.badge.checkmark"
         ) {
-            Text(
-                model.recoverySetupReview?.purpose == .legacyReplacement
-                    ? "The older snapshot preserved and restored its automatic values, but did "
-                        + "not record AirPlay, Personal Hotspot, or Sharing. Choose those normal "
-                        + "values now. The old snapshot stays intact unless verification succeeds."
-                    : "Automatic settings are captured exactly. Review the settings macOS requires "
-                        + "you to restore manually. No Wi-Fi, Bluetooth, or security setting changes "
-                        + "when this snapshot is saved."
-            )
+            Text(recoverySetupDescription)
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -307,17 +297,52 @@ struct MenuView: View {
                     model.cancelRecoverySetup()
                 }
                 Spacer()
-                Button(
-                    model.recoverySetupReview?.purpose == .legacyReplacement
-                        ? "Finish Recovery & Prepare Snapshot"
-                        : "Save Reviewed Snapshot"
-                ) {
+                Button(recoverySetupButtonTitle) {
                     model.confirmRecoverySetup()
                 }
                 .buttonStyle(.borderedProminent)
             }
         }
         .accessibilityIdentifier("recovery-setup-card")
+    }
+
+    private var recoverySetupTitle: String {
+        switch model.recoverySetupReview?.purpose {
+        case .some(.legacyReplacement):
+            "Finish Legacy Recovery"
+        case .some(.preparedReplacement):
+            "Rebuild Recovery Snapshot"
+        case .some(.newSnapshot), .none:
+            "Set Up Recovery Snapshot"
+        }
+    }
+
+    private var recoverySetupDescription: String {
+        switch model.recoverySetupReview?.purpose {
+        case .some(.legacyReplacement):
+            "The older snapshot preserved and restored its automatic values, but did not record "
+                + "AirPlay, Personal Hotspot, or Sharing. Choose those normal values now. The old "
+                + "snapshot stays intact unless verification succeeds."
+        case .some(.preparedReplacement):
+            "Review the newly captured normal settings. The previous prepared snapshot stays "
+                + "intact through review and cancellation, and is replaced only after the new "
+                + "snapshot is saved and verified."
+        case .some(.newSnapshot), .none:
+            "Automatic settings are captured exactly. Review the settings macOS requires you to "
+                + "restore manually. No Wi-Fi, Bluetooth, or security setting changes when this "
+                + "snapshot is saved."
+        }
+    }
+
+    private var recoverySetupButtonTitle: String {
+        switch model.recoverySetupReview?.purpose {
+        case .some(.legacyReplacement):
+            "Finish Recovery & Prepare Snapshot"
+        case .some(.preparedReplacement):
+            "Replace Reviewed Snapshot"
+        case .some(.newSnapshot), .none:
+            "Save Reviewed Snapshot"
+        }
     }
 
     private func progressCard(title: String, detail: String) -> some View {
@@ -378,7 +403,25 @@ struct MenuView: View {
 
     @ViewBuilder
     private var recoveryAttention: some View {
-        if model.recoveryState == .prepared,
+        if model.recoveryState == .invalid {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Recovery snapshot is invalid", systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline.weight(.semibold))
+                Text(
+                    "The saved recovery file could not be read or does not exactly match this "
+                        + "build's controls. It was left unchanged for investigation. Automatic "
+                        + "activation, restore, and replacement are disabled; preserve the file "
+                        + "and restore settings manually."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+            .accessibilityIdentifier("invalid-recovery-baseline")
+        } else if model.recoveryState == .prepared,
            model.preparedRecoveryMatchesCurrent != true {
             VStack(alignment: .leading, spacing: 6) {
                 Label("Prepared snapshot needs a fresh review", systemImage: "arrow.triangle.2.circlepath")
@@ -538,7 +581,7 @@ struct MenuView: View {
         .padding(.vertical, 10)
     }
 
-    private var markState: GameChangersMarkState {
+    private var markState: LockdownVisualState {
         switch model.lockdownModeState {
         case .verified:
             return .active
@@ -579,6 +622,9 @@ struct MenuView: View {
             case .attention:
                 return "ATTENTION"
             case .unmanaged:
+                if model.recoveryState == .invalid {
+                    return "INVALID"
+                }
                 return model.recoveryState == .prepared ? "CHANGED" : "UNMANAGED"
             case .off:
                 return "READY"
@@ -621,6 +667,9 @@ struct MenuView: View {
             case .attention:
                 return "Lockdown is on with recovery attention. Review status below or toggle off to restore."
             case .unmanaged:
+                if model.recoveryState == .invalid {
+                    return "Recovery snapshot invalid. Automatic changes are disabled; restore manually."
+                }
                 return model.recoveryState == .prepared
                     ? "The prepared snapshot needs a fresh review before Lockdown can turn on."
                     : "Set up a reviewed recovery snapshot before enabling Lockdown."
@@ -679,9 +728,13 @@ struct MenuView: View {
         case .attention:
             "On; recovery attention required"
         case .unmanaged:
-            recoveryState == .prepared
-                ? "Prepared snapshot changed or could not be verified"
-                : "Unmanaged; recovery snapshot missing"
+            if recoveryState == .invalid {
+                "Recovery snapshot invalid; automatic changes unavailable"
+            } else if recoveryState == .prepared {
+                "Prepared snapshot changed or could not be verified"
+            } else {
+                "Unmanaged; recovery snapshot missing"
+            }
         }
     }
 
@@ -699,9 +752,13 @@ struct MenuView: View {
         case .verified, .attention:
             "Turns Lockdown off and starts confirmed recovery"
         case .unmanaged:
-            model.recoveryState == .prepared
-                ? "Rebuild the recovery snapshot before activation"
-                : "Automatic changes are unavailable without a recovery snapshot"
+            if model.recoveryState == .invalid {
+                "Preserve the recovery file for investigation and restore settings manually"
+            } else if model.recoveryState == .prepared {
+                "Rebuild the recovery snapshot before activation"
+            } else {
+                "Automatic changes are unavailable without a recovery snapshot"
+            }
         }
     }
 }

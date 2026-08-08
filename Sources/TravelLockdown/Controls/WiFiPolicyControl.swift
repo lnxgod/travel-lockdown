@@ -163,6 +163,24 @@ struct WiFiPolicySnapshot: DeclaredNonSecretSnapshotModel, Equatable {
         try container.encode(personalHotspotRecovery, forKey: .personalHotspotRecovery)
         try container.encodeIfPresent(personalHotspotAutoJoin, forKey: .personalHotspotAutoJoin)
     }
+
+    func redactingSSIDValuesForSecretValidation() -> WiFiPolicySnapshot {
+        WiFiPolicySnapshot(
+            preferredNetworks: preferredNetworks.map {
+                WiFiNetworkProfileMetadata(
+                    ssidData: Data([0]),
+                    networkName: nil,
+                    security: $0.security
+                )
+            },
+            rememberJoinedNetworks: rememberJoinedNetworks,
+            requireAdministratorForAssociation: requireAdministratorForAssociation,
+            requireAdministratorForPower: requireAdministratorForPower,
+            requireAdministratorForIBSSMode: requireAdministratorForIBSSMode,
+            personalHotspotRecovery: personalHotspotRecovery,
+            personalHotspotAutoJoin: personalHotspotAutoJoin
+        )
+    }
 }
 
 private struct WiFiMetadataCodingKey: CodingKey {

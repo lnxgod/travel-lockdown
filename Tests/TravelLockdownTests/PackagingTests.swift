@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 import Testing
@@ -12,6 +13,36 @@ struct PackagingTests {
             .deletingLastPathComponent()
     }
 
+    private func validateMacIcon(_ icon: URL) throws {
+        let manager = FileManager.default
+        let iconSet = manager.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("TravelLockdownIcon-\(UUID().uuidString).iconset")
+        defer { try? manager.removeItem(at: iconSet) }
+
+        let extraction = try runProcess(
+            executable: URL(fileURLWithPath: "/usr/bin/iconutil"),
+            arguments: ["--convert", "iconset", "--output", iconSet.path, icon.path]
+        )
+        #expect(
+            extraction.exitCode == 0,
+            "iconutil could not extract AppIcon.icns: \(extraction.stderr)"
+        )
+        guard extraction.exitCode == 0 else { return }
+
+        let images = try manager.contentsOfDirectory(
+            at: iconSet,
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension.lowercased() == "png" }
+        let pixelWidths = try images.compactMap { image -> Int? in
+            NSBitmapImageRep(data: try Data(contentsOf: image))?.pixelsWide
+        }
+
+        #expect(pixelWidths.count >= 5)
+        #expect(pixelWidths.min().map { $0 <= 32 } == true)
+        #expect(pixelWidths.max().map { $0 >= 1_024 } == true)
+    }
+
     @Test("release bundle advertises a menu-bar-only executable")
     func appBundleInfoContainsMenuBarFlag() throws {
         let info = try PropertyListSerialization.propertyList(
@@ -23,14 +54,14 @@ struct PackagingTests {
         #expect(info?["CFBundleExecutable"] as? String == "TravelLockdown")
         #expect(info?["CFBundleIdentifier"] as? String == "ai.gamechangers.travel-lockdown")
         #expect(info?["CFBundleIconFile"] as? String == "AppIcon.icns")
-        #expect(info?["CFBundleShortVersionString"] as? String == "1.0.1")
-        #expect(info?["CFBundleVersion"] as? String == "2")
+        #expect(info?["CFBundleShortVersionString"] as? String == "1.0.2")
+        #expect(info?["CFBundleVersion"] as? String == "3")
         #expect(info?["LSMinimumSystemVersion"] as? String == "15.0")
     }
 
     @Test("public release keeps a native menu trigger and the full branded dashboard")
     func publicReleaseMetadataIsComplete() throws {
-        let logo = packageRoot.appendingPathComponent("Assets/gamechangers-ai.png")
+        let logo = packageRoot.appendingPathComponent("Assets/friend-or-foe-shield.png")
         let icon = packageRoot.appendingPathComponent("Assets/AppIcon.icns")
         let license = packageRoot.appendingPathComponent("LICENSE")
         let menuSource = packageRoot
@@ -40,6 +71,7 @@ struct PackagingTests {
         #expect(FileManager.default.fileExists(atPath: logo.path))
         #expect(FileManager.default.fileExists(atPath: icon.path))
         #expect(try Data(contentsOf: icon).prefix(4) == Data("icns".utf8))
+        try validateMacIcon(icon)
         #expect(FileManager.default.fileExists(atPath: license.path))
         #expect(menuText.contains("LockdownSwitch"))
         #expect(menuText.contains("Refreshing status"))
@@ -48,7 +80,8 @@ struct PackagingTests {
         #expect(menuText.contains("GroupBox(\"Preflight\")"))
         #expect(menuText.contains("Label(\"Status\", systemImage: \"checkmark.shield\")"))
         #expect(menuText.contains("Label(\"Preflight\", systemImage: \"checklist\")"))
-        #expect(menuText.contains("GameChangersBrandLogo"))
+        #expect(menuText.contains("FriendOrFoeBrandLogo"))
+        #expect(menuText.contains("GameChangersBrandLogo") == false)
         #expect(menuText.contains(".frame(height: MenuPanelLayout.dashboardViewportHeight)"))
         #expect(menuText.contains(".frame(maxHeight: 520)") == false)
         #expect(menuText.contains("Recovery snapshot missing"))
@@ -61,7 +94,38 @@ struct PackagingTests {
         )
         #expect(appSource.contains("Label(menuBarPresentation.title"))
         #expect(appSource.contains(".menuBarExtraStyle(.window)"))
+        #expect(appSource.contains("FriendOrFoeMenuBarLogo") == false)
         #expect(appSource.contains("GameChangersMenuBarLogo") == false)
+    }
+
+    @Test("Friend or Foe shield preserves the canonical three-triangle mark")
+    func friendOrFoeMarkUsesCanonicalGeometry() {
+        #expect(FriendOrFoeMarkGeometry.viewport == 24)
+        #expect(
+            FriendOrFoeMarkGeometry.triangles == [
+                FriendOrFoeTriangle(
+                    topX: 12,
+                    topY: 2,
+                    leftX: 7,
+                    baseY: 10,
+                    rightX: 17
+                ),
+                FriendOrFoeTriangle(
+                    topX: 6.5,
+                    topY: 11,
+                    leftX: 1.5,
+                    baseY: 19,
+                    rightX: 11.5
+                ),
+                FriendOrFoeTriangle(
+                    topX: 17.5,
+                    topY: 11,
+                    leftX: 12.5,
+                    baseY: 19,
+                    rightX: 22.5
+                )
+            ]
+        )
     }
 
     @Test("command-line parser accepts restore only as the exact mutation mode")
@@ -364,7 +428,7 @@ struct PackagingTests {
             FileManager.default.fileExists(
                 atPath: fixture.project
                     .appendingPathComponent(
-                        "build/TravelLockdown.app/Contents/Resources/gamechangers-ai.png"
+                        "build/TravelLockdown.app/Contents/Resources/friend-or-foe-shield.png"
                     )
                     .path
             )
@@ -791,13 +855,13 @@ private struct BuildScriptFixture {
         script = scripts.appendingPathComponent("build-app.sh")
         try manager.copyItem(at: sourceScript, to: script)
         try manager.copyItem(at: sourcePlist, to: app.appendingPathComponent("Info.plist"))
-        let sourceLogo = sourcePlist
+        let sourceShieldLogo = sourcePlist
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("Assets/gamechangers-ai.png")
+            .appendingPathComponent("Assets/friend-or-foe-shield.png")
         try manager.copyItem(
-            at: sourceLogo,
-            to: assets.appendingPathComponent("gamechangers-ai.png")
+            at: sourceShieldLogo,
+            to: assets.appendingPathComponent("friend-or-foe-shield.png")
         )
         let sourceIcon = sourcePlist
             .deletingLastPathComponent()
